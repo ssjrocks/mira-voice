@@ -166,23 +166,13 @@
                         android:text="@string/add_voice"
                         android:textAppearance="?attr/textAppearanceTitleSmall" />
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/newTextLayout"
-                        style="?attr/textInputOutlinedStyle"
+                    <TextView
+                        android:id="@+id/addHint"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:layout_marginTop="8dp"
-                        android:hint="@string/new_text_hint"
-                        app:helperText="@string/new_text_help">
-
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/newTextInput"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:gravity="top"
-                            android:inputType="textMultiLine|textCapSentences"
-                            android:minLines="2" />
-                    </com.google.android.material.textfield.TextInputLayout>
+                        android:layout_marginTop="4dp"
+                        android:text="@string/add_voice_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <TextView
                         android:id="@+id/script"
@@ -203,10 +193,17 @@
                         android:max="100"
                         android:visibility="gone" />
 
-                    <LinearLayout
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/exampleButton"
+                        style="@style/Widget.Material3.Button.TonalButton"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
+                        android:text="@string/read_example" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
                         android:orientation="horizontal">
 
                         <com.google.android.material.button.MaterialButton
@@ -216,7 +213,7 @@
                             android:layout_height="wrap_content"
                             android:layout_marginEnd="8dp"
                             android:layout_weight="1"
-                            android:text="@string/record" />
+                            android:text="@string/record_speech" />
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/pickButton"
@@ -417,27 +414,6 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:text="@string/threads_hint"
-                        android:textAppearance="?attr/textAppearanceBodySmall" />
-
-                    <TextView
-                        android:id="@+id/clipLabel"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginTop="12dp"
-                        android:textAppearance="?attr/textAppearanceBodyMedium" />
-
-                    <com.google.android.material.slider.Slider
-                        android:id="@+id/clipSlider"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:stepSize="1"
-                        android:valueFrom="5"
-                        android:valueTo="20" />
-
-                    <TextView
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:text="@string/clip_hint"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <com.google.android.material.materialswitch.MaterialSwitch

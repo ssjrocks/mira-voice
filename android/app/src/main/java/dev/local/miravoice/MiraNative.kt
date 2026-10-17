@@ -21,6 +21,11 @@ object MiraNative {
     external fun load(ggufPath: String, headPath: String, threads: Int): Long
     external fun free(handle: Long)
 
+    /** Speech recognition (whisper.cpp): load the model (throws on failure), transcribe 16 kHz audio, free. */
+    external fun asrLoad(modelPath: String): Long
+    external fun asrTranscribe(handle: Long, pcm16k: FloatArray, threads: Int): String
+    external fun asrFree(handle: Long)
+
     /**
      * Speech codes (0..8191). stats receives [promptTokens, generatedTokens, prefillMs, generateMs].
      * promptCodes: speech codes of the voice clip whose transcript starts [text] (accent mode), or null.

@@ -12,9 +12,9 @@ class SavedVoice(
     var name: String,
     val created: Long,
     val source: String,
-    val seconds: Float,
+    var seconds: Float,
     val tokens: IntArray,
-    val promptCodes: IntArray?,
+    var promptCodes: IntArray?,
     var transcript: String,
     /** Last transcript check (test-sentence length / expected); null = not checked since the transcript changed. */
     var checkRatio: Double? = null,
@@ -55,6 +55,9 @@ class VoiceLibrary(context: Context) {
     }
 
     fun refWav(id: String) = File(File(root, id), "ref.wav")
+
+    /** Replaces a voice's clip (e.g. after shortening it to the longest usable length). */
+    fun saveClip(id: String, wav16k: FloatArray) = AudioIO.writeWav(refWav(id), wav16k, 16000)
 
     fun add(name: String, source: String, wav16k: FloatArray, tokens: IntArray, codes: IntArray?, transcript: String): SavedVoice {
         val id = "v" + System.currentTimeMillis()

@@ -103,6 +103,18 @@ class MiraPipeline(
         }
     }
 
+    /** What was said in a 16 kHz clip (speech recognition), or null if the model isn't downloaded. */
+    fun transcribe(wav16k: FloatArray): String? {
+        val f = File(dir, ModelFiles.ASR)
+        if (!f.isFile) return null
+        val h = MiraNative.asrLoad(f.path)  // ~0.3 GB, only for this call
+        try {
+            return MiraNative.asrTranscribe(h, wav16k, llmThreads).trim()
+        } finally {
+            MiraNative.asrFree(h)
+        }
+    }
+
     /**
      * Speaks [text]: chunk by chunk (sentences, merged up to ~200 characters) through the LLM and decoder,
      * returning all the audio at once (16 or 48 kHz, peak-normalised).
@@ -236,6 +248,8 @@ class MiraPipeline(
 
     companion object {
         const val REF_SAMPLES = 96000           // the speaker encoder sees exactly 6 s
+        /** Longest voice clip used (accent mode re-reads it for every part of a text: ~0.4 s per clip second there). */
+        const val MAX_CLIP_SAMPLES = 25 * 16000
         private const val FEAT_DIM = 1024
         private const val HOP = 320                // 16 kHz samples per speech code
         private const val DEC_WINDOW = 400         // codes decoded per window (8 s)

@@ -1,5 +1,4 @@
 {
- "release": "models-1",
  "files": [
   {
    "name": "mira.gguf",
@@ -42,6 +41,12 @@
    "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/vocoder.onnx",
    "size": 210521624,
    "sha256": "1064b39ebb33831308bba3807f532905ae2d56c280329d29b3de6fc351983d3a"
+  },
+  {
+   "name": "whisper-small.en-q5_1.bin",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-2/whisper-small.en-q5_1.bin",
+   "size": 190098681,
+   "sha256": "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30"
   }
  ]
 }

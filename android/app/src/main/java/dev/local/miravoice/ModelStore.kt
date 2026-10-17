@@ -18,6 +18,8 @@ object ModelFiles {
     const val PROCESSER = "processer.onnx"
     const val VOCODER = "vocoder.onnx"
     const val UPSAMPLER = "upsampler.onnx"
+    /** Speech recognition for voice setup (whisper small.en); optional: without it transcripts are typed. */
+    const val ASR = "whisper-small.en-q5_1.bin"
 
     /** Needed to speak at all; the semantic encoder is only needed to set up accent matching. */
     val REQUIRED = listOf(GGUF, HEAD, SPEAKER, PROCESSER, VOCODER, UPSAMPLER)

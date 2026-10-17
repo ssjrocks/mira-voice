@@ -17,16 +17,21 @@ Later versions are offered in the app: it checks this repository's releases page
 
 ## Using it
 
-1. **Add a voice** (Voices card): type what you'll say in *What you'll say* (or keep the suggested sentence),
-   tap *Record* and read it exactly; or type what's said in a file and tap *Pick file*. Recording stops at the
-   *Accent clip length* (Settings, 5–20 s, default 12); for files, only their first that-many seconds are used.
-   Voices are kept in a library: pick one to use, play its clip, rename, delete or edit its transcript.
+1. **Add a voice** (Voices card), one of three ways:
+   - *Record: read the example*: read the sentence shown at your normal pace;
+   - *Record speech*: say anything, or play the speech you want to copy (a video, a voice message) near the phone;
+   - *Pick file*: any audio file.
+
+   The whole clip is used, up to 25 s (longer clips are cut at a pause). Speech recognition (whisper.cpp,
+   `small.en`, on the phone) then writes down what was said; check it word for word against the clip (Play is in
+   the same dialog), fix anything misheard, name the voice and save. Voices are kept in a library: pick one to use,
+   play its clip, rename, delete, or edit its transcript (*Transcribe again* redoes it from the clip).
 2. With **Match accent and speaking style** on, the model continues from the clip's own speech, which keeps
-   the speaker's accent (e.g. Australian) instead of the model's default American one. This only works if the
-   transcript matches the clip **word for word**: extra words in the transcript get spoken at the start of every
-   output, and speech in the clip missing from the transcript makes outputs come out almost silent. The app
-   test-speaks a short sentence after you add a voice or change its transcript and warns you if they don't match;
-   any part that still comes out almost silent is redone without accent matching.
+   the speaker's accent (e.g. Australian) instead of the model's default American one. This needs the transcript to
+   match the clip **exactly**, including its last word: extra words get spoken at the start of every output, and
+   speech missing from the transcript (even a trailing "s") makes outputs come out almost silent. After you save a
+   voice or edit its transcript the app test-speaks a short sentence and warns you if they don't match; any part
+   that still comes out almost silent is redone without accent matching.
 3. Type text and tap **Speak**. The whole text is generated first, then played.
 
 Each app session writes a log (device, timings, memory, errors) to
@@ -47,6 +52,7 @@ that writes BiCodec speech tokens (50 per second of audio), plus a codec and an 
 | voice clip → 32 voice tokens (timbre) | `speaker_encoder.onnx` (mel + BiCodec speaker encoder) | ONNX Runtime |
 | voice clip → its speech tokens (accent mode) | `semantic_encoder.onnx` (wav2vec2-xlsr-53 layers 1–16 + quantiser, fp16 weights) | ONNX Runtime |
 | text + voice → speech tokens | `mira.gguf` (Q8_0) + `mira_head.bin` | llama.cpp |
+| voice clip → its transcript (voice setup) | `whisper-small.en-q5_1.bin` | whisper.cpp (sharing llama.cpp's ggml) |
 | speech tokens → 16 kHz audio | `processer.onnx` + `vocoder.onnx` | ONNX Runtime |
 | 16 kHz → 48 kHz | `upsampler.onnx` (FlashSR) | ONNX Runtime |
 
@@ -103,6 +109,6 @@ PyTorch model (Whisper word error rate, speaker similarity). `tools/` has the ad
   share-alike, with attribution). Built on [Spark-TTS / BiCodec](https://github.com/SparkAudio/Spark-TTS).
 - [FlashSR](https://github.com/ysharma3501/FlashSR) upsampler, [FastBiCodec](https://github.com/ysharma3501/FastBiCodec).
 - [wav2vec2-large-xlsr-53](https://huggingface.co/facebook/wav2vec2-large-xlsr-53) (Apache 2.0).
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT), [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT).
+- [llama.cpp](https://github.com/ggml-org/llama.cpp) and [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT), [Whisper](https://github.com/openai/whisper) weights (MIT), [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT).
 
 Only clone voices of people who have agreed to it.

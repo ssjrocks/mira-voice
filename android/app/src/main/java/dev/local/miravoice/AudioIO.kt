@@ -146,6 +146,28 @@ object AudioIO {
         return out
     }
 
+    /**
+     * Shortens [x] to at most [max] samples, cutting at the quietest 20 ms in the last 5 s before the limit
+     * (normally a pause between words), so the clip doesn't end mid-word.
+     */
+    fun cutAtPause(x: FloatArray, max: Int, rate: Int = 16000): FloatArray {
+        if (x.size <= max) return x
+        val frame = rate / 50
+        val from = max(0, max - 5 * rate) / frame
+        val to = max / frame - 1
+        var best = to
+        var bestRms = Float.MAX_VALUE
+        for (f in from..to) {
+            var s = 0f
+            for (k in f * frame until (f + 1) * frame) s += x[k] * x[k]
+            if (s <= bestRms) {  // ties go to the later frame: keep as much speech as possible
+                bestRms = s
+                best = f
+            }
+        }
+        return x.copyOf((best + 1) * frame)
+    }
+
     /** Drops leading/trailing near-silence (20 ms frames below 2% of the loudest frame's RMS). */
     fun trimSilence(x: FloatArray, rate: Int = 16000): FloatArray {
         val frame = rate / 50

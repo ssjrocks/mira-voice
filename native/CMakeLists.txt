@@ -24,3 +24,13 @@ target_link_libraries(mira_cli PRIVATE mira_engine)
 if(NOT MSVC)
   target_compile_options(mira_engine PRIVATE -O3 -ffast-math)
 endif()
+
+# Speech recognition (whisper.cpp) built against llama.cpp's ggml, so the app ships one copy of ggml.
+set(WHISPER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../upstream/whisper.cpp)
+add_library(mira_asr STATIC mira_asr.cpp ${WHISPER_DIR}/src/whisper.cpp ${WHISPER_DIR}/src/aneforge/whisper-aneforge.cpp)
+target_include_directories(mira_asr PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${WHISPER_DIR}/include PRIVATE ${WHISPER_DIR}/src)
+target_compile_definitions(mira_asr PRIVATE WHISPER_VERSION="1.9.5" WHISPER_SHARED_EXPORT= )
+target_link_libraries(mira_asr PUBLIC ggml)
+
+add_executable(mira_asr_cli mira_asr_cli.cpp)
+target_link_libraries(mira_asr_cli PRIVATE mira_asr)

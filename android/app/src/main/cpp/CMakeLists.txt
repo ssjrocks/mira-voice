@@ -17,7 +17,13 @@ endif()
 
 add_subdirectory(${ROOT}/upstream/llama.cpp build-llama)
 
-add_library(miravoice SHARED mira_jni.cpp ${ROOT}/native/mira_engine.cpp)
-target_include_directories(miravoice PRIVATE ${ROOT}/native)
-target_compile_options(miravoice PRIVATE -O3 -ffast-math)
+# speech recognition (whisper.cpp) shares llama.cpp's ggml
+set(WHISPER_DIR ${ROOT}/upstream/whisper.cpp)
+add_library(miravoice SHARED mira_jni.cpp ${ROOT}/native/mira_engine.cpp ${ROOT}/native/mira_asr.cpp
+        ${WHISPER_DIR}/src/whisper.cpp ${WHISPER_DIR}/src/aneforge/whisper-aneforge.cpp)
+target_include_directories(miravoice PRIVATE ${ROOT}/native ${WHISPER_DIR}/include ${WHISPER_DIR}/src)
+target_compile_definitions(miravoice PRIVATE WHISPER_VERSION="1.9.5")
+target_compile_options(miravoice PRIVATE -O3)
+# fast-math only for the engine's sampler/head; whisper.cpp relies on infinities when masking tokens
+set_source_files_properties(${ROOT}/native/mira_engine.cpp PROPERTIES COMPILE_OPTIONS "-ffast-math")
 target_link_libraries(miravoice llama ggml android log)

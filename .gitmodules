@@ -10,3 +10,6 @@
 [submodule "upstream/FlashSR"]
 	path = upstream/FlashSR
 	url = https://github.com/ysharma3501/FlashSR.git
+[submodule "upstream/whisper.cpp"]
+	path = upstream/whisper.cpp
+	url = https://github.com/ggml-org/whisper.cpp.git

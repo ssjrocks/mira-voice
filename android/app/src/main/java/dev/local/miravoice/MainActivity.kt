@@ -8,15 +8,16 @@ import android.os.Bundle
 import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.provider.Settings
-import android.text.Editable
 import android.text.InputType
-import android.text.TextWatcher
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
 import com.google.android.material.textfield.TextInputEditText
@@ -33,7 +34,6 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
-import kotlin.math.min
 
 /** Survives activity re-creation so the models are loaded once per process. */
 object Engine {
@@ -59,10 +59,22 @@ class MainActivity : AppCompatActivity() {
     private val player = ClipPlayer { updatePlayButtons() }
 
     private val pickAudio = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) loadVoiceFromUri(uri, displayName(uri), transcript = null, ask = true)
+        if (uri != null) loadVoiceFromUri(uri, displayName(uri), preset = null, ask = true)
     }
+    private var micMode: AddMode = AddMode.SPEECH
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) startRecording() else toast("Microphone permission is needed to record a voice")
+        if (ok) startRecording(micMode) else toast("Microphone permission is needed to record a voice")
+    }
+
+    /** Record button handler: stops a running recording, or starts one in [mode] (asking for the mic first). */
+    private fun onRecordButton(mode: AddMode) {
+        if (recording.get()) {
+            recording.set(false)
+            return
+        }
+        micMode = mode
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording(mode)
+        else askMic.launch(Manifest.permission.RECORD_AUDIO)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -95,11 +107,8 @@ class MainActivity : AppCompatActivity() {
         }
         refreshVoices(prefs.getString("current_voice", null))
 
-        b.recordButton.setOnClickListener {
-            if (recording.get()) recording.set(false)
-            else if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startRecording()
-            else askMic.launch(Manifest.permission.RECORD_AUDIO)
-        }
+        b.exampleButton.setOnClickListener { onRecordButton(AddMode.EXAMPLE) }
+        b.recordButton.setOnClickListener { onRecordButton(AddMode.SPEECH) }
         b.pickButton.setOnClickListener { pickAudio.launch("audio/*") }
         b.playVoiceButton.setOnClickListener {
             val v = current ?: return@setOnClickListener
@@ -126,25 +135,7 @@ class MainActivity : AppCompatActivity() {
             SessionLog.i("settings", "accent matching $v")
             showVoiceStatus()
         }
-        b.newTextInput.setText(prefs.getString("new_text", null) ?: getString(R.string.script_text))
-        b.newTextInput.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                prefs.edit().putString("new_text", s?.toString().orEmpty()).apply()
-            }
-        })
         b.editTranscriptButton.setOnClickListener { editTranscript() }
-        b.clipSlider.value = prefs.getInt("clip_s", 12).toFloat().coerceIn(5f, 20f)
-        updateClipLabel()
-        b.clipSlider.addOnChangeListener { _, _, _ -> updateClipLabel() }
-        b.clipSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
-            override fun onStartTrackingTouch(slider: Slider) {}
-            override fun onStopTrackingTouch(slider: Slider) {
-                prefs.edit().putInt("clip_s", slider.value.toInt()).apply()
-                SessionLog.i("settings", "accent clip length ${slider.value.toInt()} s")
-            }
-        })
         b.threadsSlider.addOnChangeListener { _, _, _ -> updateThreadsLabel() }
         b.threadsSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {}
@@ -324,21 +315,29 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------------ voices
 
-    /** Accent clip length (s): recordings stop here, and files contribute their first this-many seconds. */
-    private fun clipSeconds() = b.clipSlider.value.toInt()
+    /** How a new voice is being added: reading the example text, any recorded speech, or an audio file. */
+    private enum class AddMode { EXAMPLE, SPEECH, FILE }
 
-    private fun updateClipLabel() {
-        b.clipLabel.text = "Accent clip length: ${clipSeconds()} s"
+    /** Result of the review / edit dialogs. */
+    private sealed class Review {
+        class Saved(val name: String, val transcript: String) : Review()
+        object Redo : Review()
     }
+
+    private var recordingMode: AddMode? = null
+    private var dialogPlayButton: MaterialButton? = null  // Play inside the review dialog; its text follows the player
+
+    private fun haveAsr() = File(ModelFiles.dir(this), ModelFiles.ASR).isFile
 
     /** Reloads the library list and selects [selectId] (or the newest voice). */
-    private fun refreshVoices(selectId: String?) {
+    private fun refreshVoices(selectId: String?, check: Boolean = true) {
         voices = library.list()
         b.voiceMenu.setSimpleItems(voices.map { it.name }.toTypedArray())
-        selectVoice(voices.firstOrNull { it.id == selectId } ?: voices.lastOrNull())
+        selectVoice(voices.firstOrNull { it.id == selectId } ?: voices.lastOrNull(), check)
     }
 
-    private fun selectVoice(v: SavedVoice?) {
+    /** [check]: run the one-time transcript check if this voice hasn't had one (callers that check it themselves pass false). */
+    private fun selectVoice(v: SavedVoice?, check: Boolean = true) {
         if (v?.id != current?.id && player.playing == "voice") player.stop()
         current = v
         prefs.edit().putString("current_voice", v?.id).apply()
@@ -350,7 +349,7 @@ class MainActivity : AppCompatActivity() {
         if (v != null) SessionLog.i("voice", "selected '${v.name}' (${v.id}, %.1f s, ${v.promptCodes?.size ?: 0} prompt codes)".format(v.seconds))
         showVoiceStatus()
         updateButtons()
-        checkUncheckedVoice()
+        if (check) checkUncheckedVoice()
     }
 
     /** Voices made before 0.4 (or whose transcript changed) are checked once, when selected and the models are ready. */
@@ -373,8 +372,9 @@ class MainActivity : AppCompatActivity() {
             !b.accentSwitch.isChecked -> "accent matching off"
             v.promptCodes == null -> "add this voice again to match its accent"
             v.transcript.isBlank() -> "no transcript, so no accent matching"
-            v.transcriptMismatch -> "⚠ transcript doesn't match the clip (tap Edit transcript or record again)"
-            else -> "accent matching on"
+            v.transcriptMismatch -> "⚠ transcript doesn't match the clip (tap Edit transcript)"
+            // the clip's codes are re-read for every part of a text: ~0.4 s per clip second on a Snapdragon 8 Gen 2
+            else -> "accent matching on (each part starts about %.0f s later)".format(v.promptCodes!!.size / 50.0 * 0.4)
         }
         b.voiceStatus.text = "%s · %.1f s clip · %s".format(v.source.ifBlank { "Voice" }, v.seconds, accent)
         b.transcriptView.text = if (v.transcript.isBlank()) "What's said in the clip: (not set)"
@@ -384,7 +384,7 @@ class MainActivity : AppCompatActivity() {
     private fun renameVoice() {
         val v = current ?: return
         lifecycleScope.launch {
-            val name = askText("Rename voice", v.name, multiLine = false) ?: return@launch
+            val name = askText("Rename voice", v.name) ?: return@launch
             if (name.isBlank()) return@launch
             SessionLog.i("voice", "renamed '${v.name}' to '$name'")
             v.name = name
@@ -412,87 +412,150 @@ class MainActivity : AppCompatActivity() {
     private fun editTranscript() {
         val v = current ?: return
         lifecycleScope.launch {
-            val t = askText("What's said in the clip", v.transcript, multiLine = true,
-                message = "Type exactly what's said in the clip, word for word. A transcript that doesn't match makes outputs " +
-                    "repeat part of the clip or come out almost silent. Clear it to turn accent matching off for this voice.")
-                ?: return@launch
-            v.transcript = t
-            v.checkRatio = null
-            library.save(v)
-            SessionLog.i("voice", "transcript of '${v.name}' edited (${t.length} chars)")
-            showVoiceStatus()
-            checkVoice(v)
+            val clip = library.refWav(v.id).takeIf { it.isFile }?.let { AudioIO.readWav16(it) }
+            val r = reviewDialog("What's said in the clip", null, v.transcript,
+                "Type exactly what's said in the clip, word for word (play it to check). A transcript that doesn't match " +
+                    "makes outputs repeat part of the clip or come out almost silent. Clear it to turn accent matching off " +
+                    "for this voice." + if (clip != null && haveAsr()) " Transcribe again redoes it from the clip." else "",
+                clip, offerRedo = clip != null && haveAsr()) ?: return@launch
+            when (r) {
+                is Review.Redo -> redoFromClip(v, clip!!)
+                is Review.Saved -> {
+                    v.transcript = r.transcript
+                    v.checkRatio = null
+                    library.save(v)
+                    SessionLog.i("voice", "transcript of '${v.name}' edited (${r.transcript.length} chars)")
+                    showVoiceStatus()
+                    checkVoice(v)
+                }
+            }
         }
     }
 
-    /** A dialog with one text field; returns the trimmed text, or null if cancelled. */
-    private suspend fun askText(title: String, initial: String, multiLine: Boolean, message: String? = null): String? =
-        suspendCancellableCoroutine { c ->
-            val input = TextInputEditText(this).apply {
-                setText(initial)
-                setSelection(initial.length)
-                inputType = if (multiLine) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+    /** Re-derives a voice's speech codes and transcript from its stored clip (fixes voices made before 0.5). */
+    private suspend fun redoFromClip(v: SavedVoice, clip: FloatArray) {
+        val p = Engine.pipeline ?: return
+        val wav = AudioIO.cutAtPause(clip, MiraPipeline.MAX_CLIP_SAMPLES)
+        setBusy(true)
+        b.voiceStatus.text = "Working out what's said in the clip…"
+        val (codes, heard) = try {
+            withContext(Engine.worker) {
+                val c = if (File(ModelFiles.dir(this@MainActivity), ModelFiles.SEMANTIC).isFile) p.encodePromptCodes(wav) else null
+                c to p.transcribe(wav)
             }
-            val box = TextInputLayout(this).apply {
-                setPadding(48, 16, 48, 0)
-                addView(input)
-            }
-            MaterialAlertDialogBuilder(this)
-                .setTitle(title)
-                .apply { if (message != null) setMessage(message) }
-                .setView(box)
-                .setPositiveButton("Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
-                .setNegativeButton("Cancel") { _, _ -> if (c.isActive) c.resume(null) }
-                .setOnCancelListener { if (c.isActive) c.resume(null) }
-                .show()
+        } catch (e: Throwable) {
+            SessionLog.e("voice", "re-transcribing '${v.name}' failed", e)
+            setBusy(false)
+            showVoiceStatus()
+            toast("Couldn't transcribe the clip: ${e.message}")
+            return
         }
+        setBusy(false)
+        showVoiceStatus()
+        SessionLog.i("voice", "re-transcribed '${v.name}': %.1f s, %d codes, ${heard?.length ?: 0} chars".format(wav.size / 16000f, codes?.size ?: 0))
+        val r = reviewDialog("What's said in the clip", null, heard.orEmpty(),
+            "Speech recognition wrote this down. Play the clip and fix any word it misheard." +
+                if (wav.size < clip.size) " The clip is shortened to %.0f s, the longest usable.".format(wav.size / 16000f) else "",
+            wav, offerRedo = false) as? Review.Saved ?: return
+        if (wav.size < clip.size) library.saveClip(v.id, wav)
+        v.seconds = wav.size / 16000f
+        v.promptCodes = codes
+        v.transcript = r.transcript
+        v.checkRatio = null
+        library.save(v)
+        showVoiceStatus()
+        checkVoice(v)
+    }
 
-    /** Name + transcript for a new voice; null if discarded. */
-    private suspend fun askNewVoice(defaultName: String, transcript: String, note: String): Pair<String, String>? =
+    /** Clip review: an explanation, a Play button, optionally the name, and the transcript to check. */
+    private suspend fun reviewDialog(title: String, name: String?, transcript: String, note: String, clip: FloatArray?,
+                                     offerRedo: Boolean, cancelLabel: String = "Cancel"): Review? =
         suspendCancellableCoroutine { c ->
-            fun field(text: String, multi: Boolean) = TextInputEditText(this).apply {
-                setText(text)
-                inputType = if (multi) InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
-                else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            val pad = (16 * resources.displayMetrics.density).toInt()
+            val box = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(pad + pad / 2, pad / 2, pad + pad / 2, 0)
             }
-            val name = field(defaultName, false)
-            val words = field(transcript, true)
-            val box = android.widget.LinearLayout(this).apply {
-                orientation = android.widget.LinearLayout.VERTICAL
-                setPadding(48, 16, 48, 0)
-                addView(TextInputLayout(this@MainActivity).apply { hint = "Name"; addView(name) })
-                addView(TextInputLayout(this@MainActivity).apply { hint = "What's said in the clip (word for word)"; addView(words) })
-            }
-            MaterialAlertDialogBuilder(this)
-                .setTitle("Save voice")
-                .setMessage(note)
-                .setView(box)
-                .setPositiveButton("Save") { _, _ ->
-                    if (c.isActive) c.resume(name.text.toString().trim().ifBlank { defaultName } to words.text.toString().trim())
+            box.addView(TextView(this).apply {
+                text = note
+                setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium)
+            })
+            if (clip != null) {
+                val play = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                    text = getString(R.string.play)
+                    setOnClickListener { if (player.playing == "review") player.stop() else player.play("review", clip, 16000) }
                 }
-                .setNegativeButton("Discard") { _, _ -> if (c.isActive) c.resume(null) }
+                dialogPlayButton = play
+                box.addView(play)
+            }
+            val nameField = name?.let {
+                TextInputEditText(this).apply {
+                    setText(it)
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+                }.also { f -> box.addView(TextInputLayout(this).apply { hint = "Name"; addView(f) }) }
+            }
+            val words = TextInputEditText(this).apply {
+                setText(transcript)
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                minLines = 3
+            }
+            box.addView(TextInputLayout(this).apply { hint = "What's said in the clip (word for word)"; addView(words) })
+            val dialog = MaterialAlertDialogBuilder(this)
+                .setTitle(title)
+                .setView(android.widget.ScrollView(this).apply { addView(box) })
+                .setPositiveButton("Save") { _, _ ->
+                    if (c.isActive) c.resume(Review.Saved(nameField?.text?.toString()?.trim()?.ifBlank { name } ?: "",
+                        words.text.toString().trim()))
+                }
+                .setNegativeButton(cancelLabel) { _, _ -> if (c.isActive) c.resume(null) }
+                .apply { if (offerRedo) setNeutralButton("Transcribe again") { _, _ -> if (c.isActive) c.resume(Review.Redo) } }
                 .setOnCancelListener { if (c.isActive) c.resume(null) }
+                .setOnDismissListener {
+                    if (player.playing == "review") player.stop()
+                    dialogPlayButton = null
+                }
                 .show()
+            c.invokeOnCancellation { dialog.dismiss() }
         }
 
-    private fun startRecording() {
+    /** A dialog with one text field; returns the trimmed text, or null if cancelled. */
+    private suspend fun askText(title: String, initial: String): String? = suspendCancellableCoroutine { c ->
+        val input = TextInputEditText(this).apply {
+            setText(initial)
+            setSelection(initial.length)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val box = TextInputLayout(this).apply {
+            setPadding(48, 16, 48, 0)
+            addView(input)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
+            .setNegativeButton("Cancel") { _, _ -> if (c.isActive) c.resume(null) }
+            .setOnCancelListener { if (c.isActive) c.resume(null) }
+            .show()
+    }
+
+    private fun startRecording(mode: AddMode) {
         player.stop()
-        val text = b.newTextInput.text?.toString()?.trim().orEmpty()
-        val limit = clipSeconds()
         recording.set(true)
-        b.recordButton.text = getString(R.string.stop_recording)
+        recordingMode = mode
+        updateButtons()
         b.recordLevel.visibility = View.VISIBLE
         b.script.visibility = View.VISIBLE
-        b.script.text = getString(R.string.script_intro) + "\n\n“" + text.ifBlank { "(say anything, then type it in when saving)" } + "”"
-        SessionLog.i("voice", "recording started (limit $limit s, text ${text.length} chars)")
+        b.script.text = if (mode == AddMode.EXAMPLE) getString(R.string.script_intro) + "\n\n“" + getString(R.string.script_text) + "”"
+        else "Recording. Speak, or play the speech you want to copy (a video, a voice message) near the phone, then tap " +
+            "Stop recording. Up to 25 s is used."
+        SessionLog.i("voice", "recording started ($mode)")
         lifecycleScope.launch {
             val wav = try {
                 withContext(Dispatchers.IO) {
-                    AudioIO.record(limit.toFloat(), { recording.get() }) { peak, secs ->
+                    AudioIO.record(40f, { recording.get() }) { peak, secs ->
                         runOnUiThread {
                             b.recordLevel.progress = (peak * 100).toInt()
-                            b.voiceStatus.text = "Recording… %.1f of %d s".format(secs, limit)
+                            b.voiceStatus.text = "Recording… %.1f s".format(secs)
                         }
                     }
                 }
@@ -500,33 +563,26 @@ class MainActivity : AppCompatActivity() {
                 SessionLog.e("voice", "recording failed", e)
                 FloatArray(0)
             }
-            val hitLimit = wav.size >= (limit - 0.2) * 16000
             recording.set(false)
-            b.recordButton.text = getString(R.string.record)
+            recordingMode = null
             b.recordLevel.visibility = View.GONE
             b.script.visibility = View.GONE
-            SessionLog.i("voice", "recording stopped: %.1f s%s".format(wav.size / 16000f, if (hitLimit) " (hit the limit)" else ""))
-            val note = if (hitLimit) "Recording stopped at the $limit s limit (Settings → Accent clip length). If you hadn't " +
-                "finished, change the transcript to exactly what you said before the cut, or record again."
-            else "Check the transcript matches what you said, word for word."
-            addVoice(wav, "Recorded", text, library.nextName(), ask = true, note = note)
+            updateButtons()
+            SessionLog.i("voice", "recording stopped: %.1f s".format(wav.size / 16000f))
+            if (mode == AddMode.EXAMPLE) addVoice(wav, "Read example", getString(R.string.script_text), library.nextName(), ask = true)
+            else addVoice(wav, "Recorded", null, library.nextName(), ask = true)
         }
     }
 
-    private fun loadVoiceFromUri(uri: Uri, name: String, transcript: String?, ask: Boolean, then: (() -> Unit)? = null) {
+    private fun loadVoiceFromUri(uri: Uri, name: String, preset: String?, ask: Boolean, then: (() -> Unit)? = null,
+                                 expected: String? = null) {
         lifecycleScope.launch {
             try {
                 b.voiceStatus.text = "Reading audio…"
                 val t0 = SystemClock.elapsedRealtime()
                 val wav = withContext(Dispatchers.IO) { AudioIO.decodeToMono(this@MainActivity, uri, 16000, 60f) }
                 SessionLog.i("voice", "decoded '$name': %.1f s in %d ms".format(wav.size / 16000f, SystemClock.elapsedRealtime() - t0))
-                // a typed transcript is used for files too, unless it's still the suggested sentence
-                val typed = b.newTextInput.text?.toString()?.trim().orEmpty().takeIf { it != getString(R.string.script_text) }
-                val secs = AudioIO.trimSilence(wav).size / 16000f
-                val note = if (secs > clipSeconds() + 0.3f) "This file has %.0f s of sound; only the first %d s are used for accent matching. Type just what's said in those seconds, word for word, or leave it empty to copy the voice without its accent."
-                    .format(secs, clipSeconds())
-                else "Type exactly what's said in the file, word for word, or leave it empty to copy the voice without its accent."
-                if (addVoice(wav, "File", transcript ?: typed ?: "", name, ask, note)) then?.invoke()
+                if (addVoice(wav, if (expected != null) "Read example" else "File", expected, name, ask, preset)) then?.invoke()
             } catch (e: Throwable) {
                 SessionLog.e("voice", "couldn't read '$name'", e)
                 b.voiceStatus.text = "Couldn't read that file: ${e.message}"
@@ -535,55 +591,129 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Analyses a clip (voice tokens from the whole clip, speech codes from its first [clipSeconds]) and adds it to the
-     * library, then checks that its transcript matches the audio.
+     * Turns a clip into a voice: trims silence, keeps at most 25 s (cut at a pause), derives voice tokens and speech
+     * codes, works out what was said (speech recognition, or the example text when that's what was read), asks the
+     * user to check it, saves the voice and checks that transcript and clip match. [preset]: a known transcript (adb).
      */
-    private suspend fun addVoice(raw: FloatArray, source: String, transcript: String, defaultName: String, ask: Boolean, note: String): Boolean {
-        val wav = AudioIO.trimSilence(raw)
-        if (wav.size < 16000 * 1.5) {
-            b.voiceStatus.text = "That clip is too short (%.1f s of sound). Aim for 6–12 seconds.".format(wav.size / 16000f)
-            SessionLog.w("voice", "clip too short: %.1f s after trimming".format(wav.size / 16000f))
+    private suspend fun addVoice(raw: FloatArray, source: String, expected: String?, defaultName: String, ask: Boolean,
+                                 preset: String? = null): Boolean {
+        val trimmed = AudioIO.trimSilence(raw)
+        if (trimmed.size < 16000 * 1.5) {
+            b.voiceStatus.text = "That clip is too short (%.1f s of sound). Aim for 8 seconds or more.".format(trimmed.size / 16000f)
+            SessionLog.w("voice", "clip too short: %.1f s after trimming".format(trimmed.size / 16000f))
             return false
         }
+        val wav = AudioIO.cutAtPause(trimmed, MiraPipeline.MAX_CLIP_SAMPLES)
+        val cut = wav.size < trimmed.size
         val p = Engine.pipeline ?: run { b.voiceStatus.text = "Models aren't loaded yet"; return false }
         setBusy(true)
         b.voiceStatus.text = "Analysing voice…"
         val haveSemantic = File(ModelFiles.dir(this), ModelFiles.SEMANTIC).isFile
-        val promptSamples = min(wav.size, clipSeconds() * 16000)
         val t0 = SystemClock.elapsedRealtime()
+        var heard: String? = null
         val (tokens, codes) = try {
-            withContext(Engine.worker) {
-                val t = p.encodeVoiceTokens(wav)
-                val c = if (haveSemantic) p.encodePromptCodes(wav.copyOf(promptSamples)) else null
-                t to c
+            val tc = withContext(Engine.worker) {
+                p.encodeVoiceTokens(wav) to if (haveSemantic) p.encodePromptCodes(wav) else null
             }
+            if (preset == null && haveAsr()) {
+                b.voiceStatus.text = "Working out what was said…"
+                val t1 = SystemClock.elapsedRealtime()
+                heard = withContext(Engine.worker) { p.transcribe(wav) }
+                SessionLog.i("voice", "speech recognition: %.1f s clip in %d ms, ${heard?.length ?: 0} chars"
+                    .format(wav.size / 16000f, SystemClock.elapsedRealtime() - t1))
+            }
+            tc
         } catch (e: Throwable) {
             SessionLog.e("voice", "voice analysis failed", e)
             b.voiceStatus.text = "Couldn't analyse the voice: ${e.message}"
             setBusy(false)
             return false
         }
-        SessionLog.i("voice", "analysed %.1f s clip in %d ms: %d prompt codes from the first %.1f s%s · %s".format(wav.size / 16000f,
-            SystemClock.elapsedRealtime() - t0, codes?.size ?: 0, promptSamples / 16000f,
-            if (haveSemantic) "" else " (no semantic encoder)", SessionLog.vitals()))
+        SessionLog.i("voice", "analysed %.1f s clip (%.1f s before trimming%s) in %d ms: %d prompt codes · %s".format(
+            wav.size / 16000f, raw.size / 16000f, if (cut) ", cut at a pause" else "", SystemClock.elapsedRealtime() - t0,
+            codes?.size ?: 0, SessionLog.vitals()))
         setBusy(false)
         showVoiceStatus()
-        val (name, words) = if (ask) askNewVoice(defaultName, transcript, note) ?: run {
-            SessionLog.i("voice", "new voice discarded")
-            return false
+        val werToExample = if (expected != null && heard != null) wordErrorRate(expected, heard) else null
+        if (werToExample != null) SessionLog.i("voice", "example read: %.0f%% of words differ from what was heard".format(werToExample * 100))
+        val transcript: String
+        var note: String
+        when {
+            preset != null -> { transcript = preset; note = "" }
+            expected != null && !cut && (heard == null || (werToExample!! <= 0.25 && sameEnding(expected, heard!!))) -> {
+                transcript = expected
+                note = "You read the example text. Check it matches what you actually said, word for word."
+                if (werToExample != null && werToExample > 0.03) note += "\n\nSpeech recognition heard:\n“$heard”"
+            }
+            heard != null -> {
+                transcript = heard!!
+                note = (if (expected != null) "What was said differs from the example text, so this is what speech recognition heard. "
+                else "Speech recognition wrote down what was said. ") + "Play the clip and fix any word it misheard."
+            }
+            else -> {
+                transcript = expected.orEmpty()
+                note = "Type exactly what's said in the clip, word for word, or leave it empty to copy the voice without its accent."
+            }
+        }
+        if (cut) note += "\n\nOnly the first %.0f s are kept (the longest a voice clip can be), cut at a pause.".format(wav.size / 16000f)
+        SessionLog.i("voice", "transcript chosen: ${if (transcript == expected) "the example text" else if (transcript == heard) "speech recognition" else "preset/typed"}")
+        val (name, words) = if (ask) {
+            val r = reviewDialog("Save voice", defaultName, transcript, note, wav, offerRedo = false, cancelLabel = "Discard")
+                as? Review.Saved ?: run {
+                    SessionLog.i("voice", "new voice discarded")
+                    return false
+                }
+            r.name to r.transcript
         } else defaultName to transcript
         val v = library.add(name, source, wav, tokens, codes, words)
-        SessionLog.i("voice", "added '${v.name}' (${v.id}), transcript ${words.length} chars")
-        refreshVoices(v.id)
-        checkVoice(v)
+        SessionLog.i("voice", "added '${v.name}' (${v.id}), transcript ${words.length} chars" +
+            if (heard != null && words != heard) " (edited after speech recognition)" else "")
+        refreshVoices(v.id, check = false)
+        val h = heard
+        if (expected != null && words == expected && h != null && h != words) {
+            // The example text is what was meant; the clip may still end differently (a dropped or cut last word),
+            // which makes outputs come out silent. If it fails the check, what was heard usually passes.
+            val ratio = checkVoice(v, warn = false)
+            if (ratio != null && (ratio < 0.6 || ratio > 2.0)) {
+                SessionLog.i("voice", "example text failed the check (%.2f): trying what was heard".format(ratio))
+                v.transcript = h
+                v.checkRatio = null
+                library.save(v)
+                showVoiceStatus()
+                val r2 = checkVoice(v)
+                if (r2 != null && r2 >= 0.6 && r2 <= 2.0) toast("The clip didn't quite match the example text, so the voice uses what was heard instead.")
+            }
+        } else checkVoice(v)
         return true
     }
 
+    /** True if the last three words agree: the end of the clip has to match its transcript exactly. */
+    private fun sameEnding(a: String, b: String): Boolean {
+        fun words(s: String) = s.lowercase().replace(Regex("[^a-z0-9' ]"), " ").split(" ").filter { it.isNotBlank() }
+        return words(a).takeLast(3) == words(b).takeLast(3)
+    }
+
+    /** Word error rate of [hyp] against [ref], ignoring case and punctuation. */
+    private fun wordErrorRate(ref: String, hyp: String): Double {
+        fun words(s: String) = s.lowercase().replace(Regex("[^a-z0-9' ]"), " ").split(" ").filter { it.isNotBlank() }
+        val r = words(ref)
+        val h = words(hyp)
+        if (r.isEmpty()) return if (h.isEmpty()) 0.0 else 1.0
+        var prev = IntArray(h.size + 1) { it }
+        for (i in 1..r.size) {
+            val cur = IntArray(h.size + 1)
+            cur[0] = i
+            for (j in 1..h.size) cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (r[i - 1] == h[j - 1]) 0 else 1)
+            prev = cur
+        }
+        return prev[h.size].toDouble() / r.size
+    }
+
     /** Test-speaks a short sentence to catch a transcript that doesn't match the clip (see MiraPipeline.checkVoice). */
-    private suspend fun checkVoice(v: SavedVoice) {
+    private suspend fun checkVoice(v: SavedVoice, warn: Boolean = true): Double? {
         val voice = v.toVoice()
         val p = Engine.pipeline
-        if (!voice.accentMode || p == null) return
+        if (!voice.accentMode || p == null) return null
         setBusy(true)
         b.voiceStatus.text = "Checking the transcript matches the clip…"
         val ratio = try {
@@ -594,7 +724,7 @@ class MainActivity : AppCompatActivity() {
         }
         setBusy(false)
         showVoiceStatus()
-        ratio ?: return
+        ratio ?: return null
         SessionLog.i("voice", "check '${v.name}': test sentence came out %.2fx the expected length".format(ratio))
         v.checkRatio = ratio
         library.save(v)
@@ -604,8 +734,9 @@ class MainActivity : AppCompatActivity() {
                 "transcript, so the model thinks your text has already been said."
             ratio > 2.0 -> "The test sentence came out far too long: the transcript seems to have words that aren't in the " +
                 "clip, and they'd be spoken at the start of every output."
-            else -> return
+            else -> return ratio
         }
+        if (!warn) return ratio
         SessionLog.w("voice", "transcript of '${v.name}' doesn't match its clip (ratio %.2f)".format(ratio))
         MaterialAlertDialogBuilder(this)
             .setTitle("Transcript doesn't match '${v.name}'")
@@ -614,6 +745,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton("Edit transcript") { _, _ -> editTranscript() }
             .setNegativeButton("Keep as is", null)
             .show()
+        return ratio
     }
 
     private fun displayName(uri: Uri): String = runCatching {
@@ -807,7 +939,9 @@ class MainActivity : AppCompatActivity() {
         val path = i.getStringExtra("voice_path")
         if (path != null) {
             val name = i.getStringExtra("voice_name") ?: File(path).nameWithoutExtension
-            loadVoiceFromUri(Uri.fromFile(File(path)), name, i.getStringExtra("voice_transcript") ?: "", ask = false, then = go)
+            // voice_expected: test the "read the example" path with a file (the text the speaker was meant to read)
+            loadVoiceFromUri(Uri.fromFile(File(path)), name, i.getStringExtra("voice_transcript"), ask = false, then = go,
+                expected = i.getStringExtra("voice_expected"))
         } else go()
     }
 
@@ -823,8 +957,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateButtons() {
         val ready = Engine.pipeline != null && !busy
         b.speakButton.isEnabled = ready && current != null
-        b.recordButton.isEnabled = ready || recording.get()
-        b.pickButton.isEnabled = ready
+        val rec = recordingMode
+        b.exampleButton.isEnabled = if (recording.get()) rec == AddMode.EXAMPLE else ready
+        b.recordButton.isEnabled = if (recording.get()) rec == AddMode.SPEECH else ready
+        b.exampleButton.text = getString(if (rec == AddMode.EXAMPLE) R.string.stop_recording else R.string.read_example)
+        b.recordButton.text = getString(if (rec == AddMode.SPEECH) R.string.stop_recording else R.string.record_speech)
+        b.pickButton.isEnabled = ready && !recording.get()
         b.renameVoiceButton.isEnabled = current != null && !busy
         b.editTranscriptButton.isEnabled = current != null && !busy
         b.deleteVoiceButton.isEnabled = current != null && !busy
@@ -839,6 +977,7 @@ class MainActivity : AppCompatActivity() {
         b.playVoiceButton.isEnabled = current?.let { library.refWav(it.id).isFile } == true
         b.playVoiceButton.text = getString(if (player.playing == "voice") R.string.stop else R.string.play)
         b.replayButton.text = getString(if (player.playing == "output") R.string.stop else R.string.play)
+        dialogPlayButton?.text = getString(if (player.playing == "review") R.string.stop else R.string.play)
         b.replayButton.isEnabled = lastAudio != null
         b.saveButton.isEnabled = lastAudio != null
     }

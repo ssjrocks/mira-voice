@@ -11,7 +11,9 @@
 
 #include "ggml-backend.h"
 #include "llama.h"
+#include "mira_asr.h"
 #include "mira_engine.h"
+#include "whisper.h"
 
 #define TAG "MiraNative"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -59,6 +61,7 @@ void throw_runtime(JNIEnv *env, const std::string &msg) {
 extern "C" JNIEXPORT void JNICALL
 Java_dev_local_miravoice_MiraNative_init(JNIEnv *env, jobject, jstring native_lib_dir) {
     llama_log_set(log_callback, nullptr);
+    whisper_log_set(log_callback, nullptr);
     std::string dir = to_string(env, native_lib_dir);
     LOGI("loading ggml backends from %s", dir.c_str());
     ggml_backend_load_all_from_path(dir.c_str());
@@ -89,6 +92,32 @@ Java_dev_local_miravoice_MiraNative_load(JNIEnv *env, jobject, jstring gguf, jst
 extern "C" JNIEXPORT void JNICALL
 Java_dev_local_miravoice_MiraNative_free(JNIEnv *, jobject, jlong handle) {
     delete reinterpret_cast<MiraEngine *>(handle);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_dev_local_miravoice_MiraNative_asrLoad(JNIEnv *env, jobject, jstring model) {
+    std::string err;
+    MiraAsr *a = MiraAsr::load(to_string(env, model), err);
+    if (!a) {
+        throw_runtime(env, err);
+        return 0;
+    }
+    return reinterpret_cast<jlong>(a);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_local_miravoice_MiraNative_asrFree(JNIEnv *, jobject, jlong handle) {
+    delete reinterpret_cast<MiraAsr *>(handle);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_dev_local_miravoice_MiraNative_asrTranscribe(JNIEnv *env, jobject, jlong handle, jfloatArray pcm, jint threads) {
+    std::vector<float> x(env->GetArrayLength(pcm));
+    env->GetFloatArrayRegion(pcm, 0, (jsize)x.size(), x.data());
+    double ms = 0;
+    std::string text = reinterpret_cast<MiraAsr *>(handle)->transcribe(x.data(), (int)x.size(), threads, &ms);
+    LOGI("transcribed %.1f s in %.0f ms", x.size() / 16000.0, ms);
+    return env->NewStringUTF(text.c_str());
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
