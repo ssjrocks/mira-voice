@@ -1,0 +1,12 @@
+[submodule "upstream/llama.cpp"]
+	path = upstream/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git
+[submodule "upstream/MiraTTS"]
+	path = upstream/MiraTTS
+	url = https://github.com/ysharma3501/MiraTTS.git
+[submodule "upstream/FastBiCodec"]
+	path = upstream/FastBiCodec
+	url = https://github.com/ysharma3501/FastBiCodec.git
+[submodule "upstream/FlashSR"]
+	path = upstream/FlashSR
+	url = https://github.com/ysharma3501/FlashSR.git

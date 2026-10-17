@@ -1,0 +1,18 @@
+# local environments and large artefacts (models, exports, builds)
+.venv/
+models/
+build/
+tools/gradle-*/
+tools/gradle-*.zip
+__pycache__/
+*.pyc
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/app/build/
+android/app/.cxx/
+android/build/
+*.keystore
+*.jks

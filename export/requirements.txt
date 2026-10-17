@@ -1,0 +1,18 @@
+# Python 3.12, CPU-only PyTorch (pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision)
+torch==2.11.*
+torchaudio==2.11.*
+transformers>=4.57,<5
+onnx>=1.19
+onnxruntime>=1.22
+onnxscript
+onnxconverter-common
+librosa
+soundfile
+safetensors
+omegaconf
+huggingface_hub
+einops
+timm
+soxr
+faster-whisper
+speechbrain

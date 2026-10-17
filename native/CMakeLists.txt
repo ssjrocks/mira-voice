@@ -1,0 +1,26 @@
+# Desktop build of the MiraTTS engine + test CLI (the Android app builds the same sources via its own CMake).
+cmake_minimum_required(VERSION 3.22)
+project(mira_native CXX C)
+set(CMAKE_CXX_STANDARD 17)
+
+set(LLAMA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../upstream/llama.cpp)
+set(LLAMA_BUILD_COMMON OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
+if(NOT DEFINED CACHE{BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "")
+endif()
+add_subdirectory(${LLAMA_DIR} llama.cpp)
+
+add_library(mira_engine STATIC mira_engine.cpp)
+target_link_libraries(mira_engine PUBLIC llama)
+target_include_directories(mira_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_executable(mira_cli mira_cli.cpp)
+target_link_libraries(mira_cli PRIVATE mira_engine)
+if(NOT MSVC)
+  target_compile_options(mira_engine PRIVATE -O3 -ffast-math)
+endif()

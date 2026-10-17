@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">Mira Voice</string>
+    <string name="subtitle">MiraTTS voice cloning, on-device</string>
+    <string name="loading">Loading models…</string>
+    <string name="download_models">Download models</string>
+    <string name="voice">Voice</string>
+    <string name="no_voice">No voice yet. Record one or pick an audio file.</string>
+    <string name="record">Record</string>
+    <string name="stop_recording">Stop recording</string>
+    <string name="pick_file">Pick file</string>
+    <string name="play">Play</string>
+    <string name="stop">Stop</string>
+    <string name="script_intro">Read this aloud, then tap Stop recording:</string>
+    <string name="script_text">Every morning I grab a coffee from the place down the road, check the weather, and then I take the dog for a walk around the park before work.</string>
+    <string name="transcript_hint">What\'s said in the clip</string>
+    <string name="transcript_help">Needed for accent matching: the exact words spoken in the first 12 seconds.</string>
+    <string name="accent">Match accent and speaking style</string>
+    <string name="text_hint">Text to speak</string>
+    <string name="default_text">G\'day! This is my voice, cloned and spoken entirely on this phone. No internet needed.</string>
+    <string name="hd">48 kHz upsampling (clearer, slower)</string>
+    <string name="speak">Speak</string>
+    <string name="output">Output</string>
+    <string name="save">Save to Music</string>
+    <string name="settings">Settings</string>
+    <string name="model_file">Language model file</string>
+    <string name="random_seed">New random variation each time</string>
+    <string name="check_updates">Check for updates</string>
+</resources>

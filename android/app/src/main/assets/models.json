@@ -1,0 +1,47 @@
+{
+ "release": "models-1",
+ "files": [
+  {
+   "name": "mira.gguf",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/mira.gguf",
+   "size": 544913984,
+   "sha256": "e4e18b6e7898ab9b78f8df547250476cefa02ed1b9e4b119b381b20bb013718a"
+  },
+  {
+   "name": "mira_head.bin",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/mira_head.bin",
+   "size": 14681856,
+   "sha256": "c3b9a126d87e63aebee2c998c5708a0b84d3c680b560df3de837f19b6a10d32b"
+  },
+  {
+   "name": "processer.onnx",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/processer.onnx",
+   "size": 174881225,
+   "sha256": "d67a8572d3d41d553f0602222243d572f9d63a3f7aaf6cd05c2eb2db292cd8e9"
+  },
+  {
+   "name": "semantic_encoder.onnx",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/semantic_encoder.onnx",
+   "size": 491366487,
+   "sha256": "e3ce844e248f72d0391756c2651502f22e88a94f4384e189e32b27e94c78f4a9"
+  },
+  {
+   "name": "speaker_encoder.onnx",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/speaker_encoder.onnx",
+   "size": 28371772,
+   "sha256": "c2b4f89d83555ab58422bec1b429cdb8a8ea336c39a5652e5847a626be93a805"
+  },
+  {
+   "name": "upsampler.onnx",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/upsampler.onnx",
+   "size": 752964,
+   "sha256": "a795441ca7e5023295c5cf8bb15a066cfa75b990ee0bc2c93a073a39983689ed"
+  },
+  {
+   "name": "vocoder.onnx",
+   "url": "https://github.com/ssjrocks/mira-voice/releases/download/models-1/vocoder.onnx",
+   "size": 210521624,
+   "sha256": "1064b39ebb33831308bba3807f532905ae2d56c280329d29b3de6fc351983d3a"
+  }
+ ]
+}

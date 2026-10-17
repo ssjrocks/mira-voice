@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.MiraVoice" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#C6BFFF</item>
+        <item name="colorSecondaryContainer">#3A3270</item>
+        <item name="colorOnSecondaryContainer">#E4DFFF</item>
+    </style>
+</resources>
