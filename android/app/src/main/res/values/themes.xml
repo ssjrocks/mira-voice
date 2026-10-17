@@ -3,5 +3,6 @@
         <item name="colorPrimary">#5B4FC4</item>
         <item name="colorSecondaryContainer">#E4DFFF</item>
         <item name="colorOnSecondaryContainer">#1A1260</item>
+        <item name="android:windowLightStatusBar">true</item>
     </style>
 </resources>

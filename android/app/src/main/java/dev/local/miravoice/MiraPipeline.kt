@@ -33,6 +33,8 @@ class Voice(val tokens: IntArray, val promptCodes: IntArray?, val transcript: St
 
 /** Per-chunk timings. */
 class ChunkStats(val text: String) {
+    /** Accent matching was dropped for this part because it came out almost silent (clip/transcript mismatch). */
+    var accentFallback = false
     var promptTokens = 0
     var speechTokens = 0
     var prefillMs = 0.0
@@ -62,6 +64,9 @@ class MiraPipeline(
     private fun opts() = OrtSession.SessionOptions().apply {
         setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
         setIntraOpNumThreads(onnxThreads)
+        // No memory arena: it kept the peak of every decode (6+ GB after a 20 s clip on a 7 GB phone).
+        setCPUArenaAllocator(false)
+        setMemoryPatternOptimization(false)
     }
 
     init {
@@ -119,17 +124,29 @@ class MiraPipeline(
             val raw = DoubleArray(4)
             // Guard against the model never emitting end-of-speech: ~3.5 codes per character is typical.
             val maxTokens = min(p.maxTokens, 100 + 12 * chunk.length)
-            val prompted = voice.accentMode
-            val llmText = if (prompted) voice.transcript!!.trim() + " " + chunk else chunk
-            val codes = MiraNative.generate(llm, llmText, voice.tokens, p.temperature, p.topK, p.topP, p.minP,
-                p.repeatPenalty, maxTokens, p.seed + i, if (prompted) voice.promptCodes else null, { _, n ->
-                    if (n % 25 == 0) onStatus("${label}generating speech… %.1f s".format(n / 50.0))
-                    !isCancelled()
-                }, raw)
+            val gen = { prompted: Boolean ->
+                val llmText = if (prompted) voice.transcript!!.trim() + " " + chunk else chunk
+                MiraNative.generate(llm, llmText, voice.tokens, p.temperature, p.topK, p.topP, p.minP,
+                    p.repeatPenalty, maxTokens, p.seed + i, if (prompted) voice.promptCodes else null, { _, n ->
+                        if (n % 25 == 0) onStatus("${label}generating speech… %.1f s".format(n / 50.0))
+                        !isCancelled()
+                    }, raw)
+            }
+            var codes = gen(voice.accentMode)
             st.promptTokens = raw[0].toInt()
-            st.speechTokens = codes.size
             st.prefillMs = raw[2]
             st.llmMs = raw[3]
+            // Almost no speech in accent mode means the clip and its transcript don't match (the model thinks
+            // the text was already spoken): redo this part from the voice tokens alone.
+            if (voice.accentMode && !isCancelled() && codes.size < 0.3 * expectedCodes(chunk)) {
+                onStatus("${label}accent matching failed for this part, retrying without it…")
+                codes = gen(false)
+                st.accentFallback = true
+                st.promptTokens += raw[0].toInt()
+                st.prefillMs += raw[2]
+                st.llmMs += raw[3]
+            }
+            st.speechTokens = codes.size
             if (isCancelled() || codes.isEmpty()) break
             onStatus("${label}decoding audio…")
             var t = SystemClock.elapsedRealtimeNanos()
@@ -144,21 +161,69 @@ class MiraPipeline(
         return peakNormalize(out.toArray())
     }
 
-    private fun decode(codes: IntArray, voiceTokens: IntArray): FloatArray {
-        val c = OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(codes.size) { codes[it].toLong() }),
-            longArrayOf(1, codes.size.toLong()))
-        val v = OnnxTensor.createTensor(env, IntBuffer.wrap(voiceTokens), longArrayOf(1, 1, voiceTokens.size.toLong()))
-        val feats = c.use { v.use { processer.run(mapOf("speech_tokens" to c, "context_tokens" to v)).use { floats(it) } } }
-        val n = codes.size
-        OnnxTensor.createTensor(env, FloatBuffer.wrap(feats), longArrayOf(1, FEAT_DIM.toLong(), n.toLong())).use { t ->
-            vocoder.run(mapOf("features" to t)).use { return floats(it) }
-        }
+    /**
+     * Test-speaks a short sentence and compares its length with what the text needs: about 1x when the clip's
+     * transcript matches its audio, under 0.6x when the clip holds more speech than the transcript, over 2x when the
+     * transcript has words the clip doesn't (they leak into every output). Returns the ratio.
+     */
+    fun checkVoice(voice: Voice): Double {
+        val raw = DoubleArray(4)
+        val codes = MiraNative.generate(llm, voice.transcript!!.trim() + " " + CHECK_TEXT, voice.tokens, 0.8f, 50, 0.95f,
+            0.05f, 1.2f, 600, 0, voice.promptCodes, null, raw)
+        return codes.size / expectedCodes(CHECK_TEXT)
     }
 
-    private fun upsample(wav16: FloatArray): FloatArray {
-        OnnxTensor.createTensor(env, FloatBuffer.wrap(wav16), longArrayOf(1, 1, wav16.size.toLong())).use { t ->
-            upsampler.run(mapOf("wav16" to t)).use { return floats(it) }
+    /** Speech codes -> 16 kHz audio, in windows of up to 8 s so memory stays small for long texts. */
+    private fun decode(codes: IntArray, voiceTokens: IntArray): FloatArray {
+        val n = codes.size
+        if (n <= DEC_WINDOW) return decodeRange(codes, voiceTokens, 0, n)
+        val out = FloatList()
+        var s = 0
+        while (s < n) {
+            val e = min(n, s + DEC_WINDOW)
+            out.addAll(decodeRange(codes, voiceTokens, s, e))
+            s = e
         }
+        return out.toArray()
+    }
+
+    /** Audio for codes [s, e), decoded with enough context either side to join seamlessly (checked on the PC:
+     *  the processer needs ~96 codes of past and 32 of future context, the vocoder 8/4). */
+    private fun decodeRange(codes: IntArray, voiceTokens: IntArray, s: Int, e: Int): FloatArray {
+        val pa = max(0, s - 96)
+        val pb = min(codes.size, e + 32)
+        val n = pb - pa
+        val c = OnnxTensor.createTensor(env, LongBuffer.wrap(LongArray(n) { codes[pa + it].toLong() }), longArrayOf(1, n.toLong()))
+        val v = OnnxTensor.createTensor(env, IntBuffer.wrap(voiceTokens), longArrayOf(1, 1, voiceTokens.size.toLong()))
+        val feats = c.use { v.use { processer.run(mapOf("speech_tokens" to c, "context_tokens" to v)).use { floats(it) } } }
+        val va = max(pa, s - 8)
+        val vb = min(pb, e + 4)
+        val tv = vb - va
+        val f = if (va == pa && vb == pb) feats else FloatArray(FEAT_DIM * tv).also {
+            for (ch in 0 until FEAT_DIM) System.arraycopy(feats, ch * n + (va - pa), it, ch * tv, tv)
+        }
+        val wav = OnnxTensor.createTensor(env, FloatBuffer.wrap(f), longArrayOf(1, FEAT_DIM.toLong(), tv.toLong())).use { t ->
+            vocoder.run(mapOf("features" to t)).use { floats(it) }
+        }
+        return wav.copyOfRange((s - va) * HOP, (e - va) * HOP)
+    }
+
+    /** 16 -> 48 kHz in windows of up to 8 s (the upsampler is local; 20 ms of context either side is plenty). */
+    private fun upsample(wav16: FloatArray): FloatArray {
+        val n = wav16.size
+        val out = FloatList(n * 3)
+        var s = 0
+        while (s < n) {
+            val e = min(n, s + UP_WINDOW)
+            val a = max(0, s - UP_CTX)
+            val b = min(n, e + UP_CTX)
+            val up = OnnxTensor.createTensor(env, FloatBuffer.wrap(wav16.copyOfRange(a, b)), longArrayOf(1, 1, (b - a).toLong())).use { t ->
+                upsampler.run(mapOf("wav16" to t)).use { floats(it) }
+            }
+            out.addAll(up.copyOfRange((s - a) * 3, (e - a) * 3))
+            s = e
+        }
+        return out.toArray()
     }
 
     override fun close() {
@@ -171,8 +236,15 @@ class MiraPipeline(
 
     companion object {
         const val REF_SAMPLES = 96000           // the speaker encoder sees exactly 6 s
-        const val PROMPT_MAX_SAMPLES = 12 * 16000 // accent mode: at most 12 s of clip (~600 codes per prompt)
         private const val FEAT_DIM = 1024
+        private const val HOP = 320                // 16 kHz samples per speech code
+        private const val DEC_WINDOW = 400         // codes decoded per window (8 s)
+        private const val UP_WINDOW = 8 * 16000
+        private const val UP_CTX = 320
+        private const val CHECK_TEXT = "This is a quick test of my voice."
+
+        /** Rough number of speech codes a text needs (~15 characters per second, 50 codes per second). */
+        fun expectedCodes(text: String) = text.length / 15.0 * 50
 
         private fun floats(r: OrtSession.Result): FloatArray {
             val b = (r[0] as OnnxTensor).floatBuffer

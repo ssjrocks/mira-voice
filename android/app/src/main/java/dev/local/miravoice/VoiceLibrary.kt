@@ -16,7 +16,11 @@ class SavedVoice(
     val tokens: IntArray,
     val promptCodes: IntArray?,
     var transcript: String,
+    /** Last transcript check (test-sentence length / expected); null = not checked since the transcript changed. */
+    var checkRatio: Double? = null,
 ) {
+    val transcriptMismatch get() = checkRatio?.let { it < 0.6 || it > 2.0 } == true
+
     fun toVoice() = Voice(tokens, promptCodes, transcript)
 
     fun toJson() = JSONObject().apply {
@@ -24,6 +28,7 @@ class SavedVoice(
         put("tokens", JSONArray(tokens.toList()))
         put("prompt_codes", promptCodes?.let { JSONArray(it.toList()) } ?: JSONObject.NULL)
         put("transcript", transcript)
+        put("check_ratio", checkRatio ?: JSONObject.NULL)
     }
 
     companion object {
@@ -31,7 +36,8 @@ class SavedVoice(
             fun ints(a: JSONArray) = IntArray(a.length()) { a.getInt(it) }
             return SavedVoice(j.getString("id"), j.getString("name"), j.getLong("created"), j.optString("source"),
                 j.optDouble("seconds", 0.0).toFloat(), ints(j.getJSONArray("tokens")),
-                j.optJSONArray("prompt_codes")?.let { ints(it) }, j.optString("transcript"))
+                j.optJSONArray("prompt_codes")?.let { ints(it) }, j.optString("transcript"),
+                if (j.isNull("check_ratio")) null else j.optDouble("check_ratio"))
         }
     }
 }

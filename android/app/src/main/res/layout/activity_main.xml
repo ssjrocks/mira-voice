@@ -132,23 +132,19 @@
                             android:text="@string/delete" />
                     </LinearLayout>
 
-                    <com.google.android.material.textfield.TextInputLayout
-                        android:id="@+id/transcriptLayout"
-                        style="?attr/textInputOutlinedStyle"
+                    <TextView
+                        android:id="@+id/transcriptView"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:hint="@string/transcript_hint"
-                        app:helperText="@string/transcript_help">
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
 
-                        <com.google.android.material.textfield.TextInputEditText
-                            android:id="@+id/transcriptInput"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:gravity="top"
-                            android:inputType="textMultiLine|textCapSentences"
-                            android:minLines="2" />
-                    </com.google.android.material.textfield.TextInputLayout>
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/editTranscriptButton"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/edit_transcript" />
 
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/accentSwitch"
@@ -169,6 +165,24 @@
                         android:layout_height="wrap_content"
                         android:text="@string/add_voice"
                         android:textAppearance="?attr/textAppearanceTitleSmall" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/newTextLayout"
+                        style="?attr/textInputOutlinedStyle"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:hint="@string/new_text_hint"
+                        app:helperText="@string/new_text_help">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/newTextInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="top"
+                            android:inputType="textMultiLine|textCapSentences"
+                            android:minLines="2" />
+                    </com.google.android.material.textfield.TextInputLayout>
 
                     <TextView
                         android:id="@+id/script"
@@ -397,6 +411,34 @@
                         android:stepSize="1"
                         android:valueFrom="1"
                         android:valueTo="8" />
+
+                    <TextView
+                        android:id="@+id/threadsHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/threads_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
+
+                    <TextView
+                        android:id="@+id/clipLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+                    <com.google.android.material.slider.Slider
+                        android:id="@+id/clipSlider"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:stepSize="1"
+                        android:valueFrom="5"
+                        android:valueTo="20" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="@string/clip_hint"
+                        android:textAppearance="?attr/textAppearanceBodySmall" />
 
                     <com.google.android.material.materialswitch.MaterialSwitch
                         android:id="@+id/randomSeedSwitch"

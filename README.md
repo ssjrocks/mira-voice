@@ -17,11 +17,16 @@ Later versions are offered in the app: it checks this repository's releases page
 
 ## Using it
 
-1. **Add a voice** (Voices card): tap *Record* and read the sentence shown (6–12 s), or *Pick file*, then name it.
-   Voices are kept in a library: pick the one to use from the list, play its clip, rename or delete it.
+1. **Add a voice** (Voices card): type what you'll say in *What you'll say* (or keep the suggested sentence),
+   tap *Record* and read it exactly; or type what's said in a file and tap *Pick file*. Recording stops at the
+   *Accent clip length* (Settings, 5–20 s, default 12); for files, only their first that-many seconds are used.
+   Voices are kept in a library: pick one to use, play its clip, rename, delete or edit its transcript.
 2. With **Match accent and speaking style** on, the model continues from the clip's own speech, which keeps
-   the speaker's accent (e.g. Australian) instead of the model's default American one. This needs the exact words
-   spoken in the clip (*What's said in the clip*). Off, it only copies the voice's timbre.
+   the speaker's accent (e.g. Australian) instead of the model's default American one. This only works if the
+   transcript matches the clip **word for word**: extra words in the transcript get spoken at the start of every
+   output, and speech in the clip missing from the transcript makes outputs come out almost silent. The app
+   test-speaks a short sentence after you add a voice or change its transcript and warns you if they don't match;
+   any part that still comes out almost silent is redone without accent matching.
 3. Type text and tap **Speak**. The whole text is generated first, then played.
 
 Each app session writes a log (device, timings, memory, errors) to

@@ -150,9 +150,9 @@ MiraEngine *MiraEngine::load(const std::string &gguf_path, const std::string &he
         for (size_t i = 0; i < h16.size(); ++i) head[i] = half_to_float(h16[i]);
     }
     auto cp = llama_context_default_params();
-    cp.n_ctx = 2560;  // prompt (~40 + text, + up to ~600 voice-clip codes in accent mode) + up to 1024 speech tokens
-    cp.n_batch = 1024;
-    cp.n_ubatch = 1024;  // embeddings mode needs the whole prompt in one ubatch
+    cp.n_ctx = 3072;  // prompt (~40 + text + up to 1000 voice-clip codes = 20 s in accent mode) + up to 1024 speech tokens
+    cp.n_batch = 1536;
+    cp.n_ubatch = 1536;  // embeddings mode needs the whole prompt in one ubatch
     if (!head.empty()) {
         // return the final (normed) hidden state of the last token; this drops the LM head from the graph
         cp.embeddings = true;
@@ -250,7 +250,10 @@ std::vector<int> MiraEngine::generate(const std::string &text, const std::vector
     stats.prefill_ms = ms_since(t0);
 
     Sampler sampler(p);
-    for (int c : prompt_codes) sampler.mark_seen(c);
+    // HF transformers would also penalise the voice clip's codes (they are in the input), but that measured worse:
+    // word errors 6% -> 1% without it, same speaker similarity. MIRA_PROMPT_PENALTY=1 restores it for comparison.
+    if (const char *pp = std::getenv("MIRA_PROMPT_PENALTY"); pp && pp[0] == '1')
+        for (int c : prompt_codes) sampler.mark_seen(c);
     const char *dbg_env = std::getenv("MIRA_DEBUG");
     const int debug_steps = dbg_env ? std::atoi(dbg_env) : 0;
     auto t1 = std::chrono::steady_clock::now();
