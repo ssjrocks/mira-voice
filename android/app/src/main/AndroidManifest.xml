@@ -16,6 +16,8 @@
         android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.MiraVoice">
+        <!-- vendor libraries QNN needs: FastRPC for the Hexagon NPU -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"

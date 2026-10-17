@@ -19,7 +19,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 6
-        versionName = "0.5.0"
+        versionName = "0.5.0-npu"
 
         ndk { abiFilters += abiList }
         externalNativeBuild {
@@ -89,5 +89,6 @@ dependencies {
     implementation("com.google.android.material:material:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.0")
+    // npu branch: ONNX Runtime with Qualcomm's QNN execution provider (Hexagon NPU); CPU EP included
+    implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0")
 }

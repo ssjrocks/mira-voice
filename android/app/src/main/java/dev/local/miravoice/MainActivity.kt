@@ -930,6 +930,19 @@ class MainActivity : AppCompatActivity() {
         val i = pendingIntent ?: return
         if (busy || Engine.pipeline == null) return
         pendingIntent = null
+        i.getStringExtra("bench_model")?.let { model ->  // npu branch: NPU benchmark
+            val shape = i.getStringExtra("bench_shape")!!.split(",").map { it.toLong() }.toLongArray()
+            setBusy(true)
+            lifecycleScope.launch {
+                val r = withContext(Engine.worker) {
+                    NpuBench.run(this@MainActivity, model, i.getStringExtra("bench_input")!!, shape,
+                        i.getStringExtra("bench_accel") ?: "cpu", i.getIntExtra("bench_threads", 4), i.getIntExtra("bench_iters", 5))
+                }
+                SessionLog.i("automation", "MIRA_BENCH $r")
+                setBusy(false)
+            }
+            return
+        }
         val text = i.getStringExtra("text") ?: return
         val hd = i.getBooleanExtra("hd", true)
         val out = i.getStringExtra("out")
