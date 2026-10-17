@@ -21,6 +21,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
 import com.google.android.material.textfield.TextInputEditText
 import com.google.android.material.textfield.TextInputLayout
+import com.ssjrocks.appreports.AppReports
 import dev.local.miravoice.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -80,6 +81,10 @@ class MainActivity : AppCompatActivity() {
         b.accentSwitch.isChecked = prefs.getBoolean("accent", true)
         b.versionLabel.text = "Version ${BuildConfig.VERSION_NAME}"
         b.logsLabel.text = "Logs: last ${SessionLog.KEEP} sessions in Android/data/$packageName/files/logs"
+        b.reportButton.setOnClickListener {
+            SessionLog.i("ui", "report a problem opened · ${SessionLog.vitals()}")
+            AppReports.showReportDialog(this, mapOf("threads" to prefs.getInt("threads", autoThreads()), "hd" to prefs.getBoolean("hd", true)))
+        }
         updateThreadsLabel()
         b.sysInfo.text = "CPU cores: ${Runtime.getRuntime().availableProcessors()} (auto threads: ${autoThreads()})\n" +
             MiraNative.systemInfo().trim()

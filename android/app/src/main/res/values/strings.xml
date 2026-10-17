@@ -32,4 +32,5 @@
     <string name="clip_hint">Applies to voices you add from now on. Longer clips match accent and pacing better, but every sentence takes about 0.5 s longer per extra second of clip. Recording stops at this length.</string>
     <string name="random_seed">New random variation each time</string>
     <string name="check_updates">Check for updates</string>
+    <string name="report_problem">Report a problem</string>
 </resources>

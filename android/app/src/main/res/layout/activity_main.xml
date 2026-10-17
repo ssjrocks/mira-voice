@@ -476,6 +476,13 @@
                         android:layout_marginTop="8dp"
                         android:textAppearance="?attr/textAppearanceBodySmall" />
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/reportButton"
+                        style="@style/Widget.Material3.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/report_problem" />
+
                     <TextView
                         android:id="@+id/sysInfo"
                         android:layout_width="match_parent"
