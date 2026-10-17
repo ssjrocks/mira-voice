@@ -62,6 +62,7 @@ object ModelStore {
         for (e in entries) {
             val part = File(dir, e.name + ".part")
             var have = if (part.isFile) part.length() else 0L
+            SessionLog.i("models", "downloading ${e.name}: ${e.size} bytes, resuming at $have")
             if (have > e.size) { part.delete(); have = 0 }
             if (have < e.size) {
                 val conn = (URL(e.url).openConnection() as HttpURLConnection).apply {
@@ -96,9 +97,11 @@ object ModelStore {
             }
             onProgress("${e.name} (checking)", before + have, total)
             if (part.length() != e.size || sha256(part) != e.sha256) {
+                SessionLog.e("models", "${e.name}: size ${part.length()} / checksum mismatch, deleting the partial file")
                 part.delete()
                 throw IOException("${e.name} is corrupt (size or checksum mismatch); try again")
             }
+            SessionLog.i("models", "${e.name} verified")
             val dst = File(dir, e.name)
             dst.delete()
             if (!part.renameTo(dst)) throw IOException("could not write $dst")

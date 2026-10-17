@@ -6,10 +6,11 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
+import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.Editable
+import android.text.InputType
 import android.text.TextWatcher
-import android.util.Log
 import android.view.View
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,15 +19,19 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.google.android.material.slider.Slider
+import com.google.android.material.textfield.TextInputEditText
+import com.google.android.material.textfield.TextInputLayout
 import dev.local.miravoice.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
 import kotlin.math.min
 
 /** Survives activity re-creation so the models are loaded once per process. */
@@ -35,24 +40,26 @@ object Engine {
     val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "mira-worker") }.asCoroutineDispatcher()
     var pipeline: MiraPipeline? = null
     var configKey: String? = null
-    var nativeReady = false
     var updateChecked = false
 }
 
 class MainActivity : AppCompatActivity() {
     private lateinit var b: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("mira", MODE_PRIVATE) }
-    private var voice: Voice? = null
+    private val library by lazy { VoiceLibrary(this) }
+    private var voices: List<SavedVoice> = emptyList()
+    private var current: SavedVoice? = null
     private var lastAudio: FloatArray? = null
     private var lastRate = 48000
     private val recording = AtomicBoolean(false)
     private val cancel = AtomicBoolean(false)
     private var busy = false
     private var pendingIntent: Intent? = null
+    private var showingVoice = false  // suppresses transcript saves while the field is filled programmatically
     private val player = ClipPlayer { updatePlayButtons() }
 
     private val pickAudio = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri != null) loadVoiceFromUri(uri, "File", transcript = null)
+        if (uri != null) loadVoiceFromUri(uri, displayName(uri), transcript = null, askName = true)
     }
     private val askMic = registerForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) startRecording() else toast("Microphone permission is needed to record a voice")
@@ -62,20 +69,23 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
+        SessionLog.i("ui", "main screen created")
 
-        if (!Engine.nativeReady) {
-            MiraNative.init(applicationInfo.nativeLibraryDir)
-            Engine.nativeReady = true
-        }
         b.threadsSlider.value = prefs.getInt("threads", autoThreads()).toFloat().coerceIn(1f, 8f)
         b.hdSwitch.isChecked = prefs.getBoolean("hd", true)
         b.randomSeedSwitch.isChecked = prefs.getBoolean("random_seed", true)
         b.accentSwitch.isChecked = prefs.getBoolean("accent", true)
         b.versionLabel.text = "Version ${BuildConfig.VERSION_NAME}"
+        b.logsLabel.text = "Logs: last ${SessionLog.KEEP} sessions in Android/data/$packageName/files/logs"
         updateThreadsLabel()
         b.sysInfo.text = "CPU cores: ${Runtime.getRuntime().availableProcessors()} (auto threads: ${autoThreads()})\n" +
             MiraNative.systemInfo().trim()
-        restoreVoice()
+
+        library.migrateLegacy(prefs, File(filesDir, "voice_ref.wav"))?.let {
+            prefs.edit().putString("current_voice", it).apply()
+            SessionLog.i("voice", "moved the saved voice of version 0.2 into the library as $it")
+        }
+        refreshVoices(prefs.getString("current_voice", null))
 
         b.recordButton.setOnClickListener {
             if (recording.get()) recording.set(false)
@@ -84,30 +94,38 @@ class MainActivity : AppCompatActivity() {
         }
         b.pickButton.setOnClickListener { pickAudio.launch("audio/*") }
         b.playVoiceButton.setOnClickListener {
-            if (player.playing == "voice") player.stop() else player.play("voice", AudioIO.readWav16(refFile()), 16000)
+            val v = current ?: return@setOnClickListener
+            if (player.playing == "voice") player.stop()
+            else library.refWav(v.id).takeIf { it.isFile }?.let { player.play("voice", AudioIO.readWav16(it), 16000) }
         }
+        b.renameVoiceButton.setOnClickListener { renameVoice() }
+        b.deleteVoiceButton.setOnClickListener { deleteVoice() }
+        b.voiceMenu.setOnItemClickListener { _, _, pos, _ -> selectVoice(voices.getOrNull(pos)) }
         b.replayButton.setOnClickListener {
             if (player.playing == "output") player.stop() else lastAudio?.let { player.play("output", it, lastRate) }
         }
         b.speakButton.setOnClickListener { speak(b.textInput.text?.toString().orEmpty(), b.hdSwitch.isChecked) }
         b.stopButton.setOnClickListener {
+            SessionLog.i("ui", "stop pressed")
             cancel.set(true)
             player.stop()
         }
         b.saveButton.setOnClickListener { saveOutput() }
-        b.hdSwitch.setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("hd", v).apply() }
+        b.hdSwitch.setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("hd", v).apply(); SessionLog.i("settings", "48 kHz upsampling $v") }
         b.randomSeedSwitch.setOnCheckedChangeListener { _, v -> prefs.edit().putBoolean("random_seed", v).apply() }
         b.accentSwitch.setOnCheckedChangeListener { _, v ->
             prefs.edit().putBoolean("accent", v).apply()
+            SessionLog.i("settings", "accent matching $v")
             showVoiceStatus()
         }
         b.transcriptInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
-                val t = s?.toString()?.trim().orEmpty()
-                prefs.edit().putString("voice_transcript", t).apply()
-                voice?.let { voice = Voice(it.tokens, it.promptCodes, t) }
+                if (showingVoice) return
+                val v = current ?: return
+                v.transcript = s?.toString()?.trim().orEmpty()
+                library.save(v)
                 showVoiceStatus()
             }
         })
@@ -116,6 +134,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(slider: Slider) {}
             override fun onStopTrackingTouch(slider: Slider) {
                 prefs.edit().putInt("threads", slider.value.toInt()).apply()
+                SessionLog.i("settings", "threads ${slider.value.toInt()}")
                 loadPipeline()
             }
         })
@@ -141,6 +160,14 @@ class MainActivity : AppCompatActivity() {
         pendingIntent = intent
         applyIntentSettings(intent)
         if (!busy) loadPipeline()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!Engine.updateChecked) {
+            Engine.updateChecked = true
+            checkForUpdates(silent = true)
+        }
     }
 
     override fun onDestroy() {
@@ -182,6 +209,7 @@ class MainActivity : AppCompatActivity() {
             b.modelStatus.text = if (missingRequired.isNotEmpty())
                 "The voice models aren't on this phone yet (%.1f GB, downloaded once).".format(mb / 1000)
             else "Updated models are available (%.0f MB): %s".format(mb, outdated.joinToString { it.name })
+            SessionLog.i("models", "missing or outdated: ${outdated.joinToString { it.name }}")
         } else {
             b.downloadBox.visibility = View.GONE
         }
@@ -198,7 +226,9 @@ class MainActivity : AppCompatActivity() {
         b.downloadButton.isEnabled = false
         b.downloadProgress.visibility = View.VISIBLE
         cancel.set(false)
+        SessionLog.i("models", "download started: ${todo.joinToString { "${it.name} ${it.size}" }}")
         lifecycleScope.launch {
+            val t0 = SystemClock.elapsedRealtime()
             try {
                 withContext(Engine.worker) {
                     Engine.pipeline?.close()  // files may be replaced
@@ -214,8 +244,9 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 b.modelStatus.text = "Models downloaded"
+                SessionLog.i("models", "download finished in %.0f s".format((SystemClock.elapsedRealtime() - t0) / 1000.0))
             } catch (e: Throwable) {
-                Log.e(TAG, "model download failed", e)
+                SessionLog.e("models", "download failed", e)
                 b.modelStatus.text = "Download failed: ${e.message}. Tap Download to resume."
             }
             setBusy(false)
@@ -251,6 +282,7 @@ class MainActivity : AppCompatActivity() {
         }
         setBusy(true)
         b.modelStatus.text = getString(R.string.loading)
+        SessionLog.i("models", "loading pipeline: $key · ${SessionLog.vitals()}")
         lifecycleScope.launch {
             try {
                 val p = withContext(Engine.worker) {
@@ -261,9 +293,9 @@ class MainActivity : AppCompatActivity() {
                 Engine.pipeline = p
                 Engine.configKey = key
                 b.modelStatus.text = "Ready · %s · loaded in %.1f s · %d threads".format(gguf(), p.loadMs / 1000.0, threads())
-                Log.i(TAG, "pipeline loaded in ${p.loadMs} ms, $key")
+                SessionLog.i("models", "pipeline loaded in ${p.loadMs} ms · ${SessionLog.vitals()}")
             } catch (e: Throwable) {
-                Log.e(TAG, "load failed", e)
+                SessionLog.e("models", "pipeline load failed", e)
                 b.modelStatus.text = e.message ?: e.toString()
             }
             refreshModelMenu()
@@ -273,32 +305,94 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ------------------------------------------------------------------ voice
+    // ------------------------------------------------------------------ voices
 
-    private fun restoreVoice() {
-        val tokens = prefs.getString("voice_tokens", null)?.split(",")?.mapNotNull { it.toIntOrNull() }?.toIntArray()
-        val codes = prefs.getString("voice_codes", null)?.split(",")?.mapNotNull { it.toIntOrNull() }?.toIntArray()
-        val transcript = prefs.getString("voice_transcript", null)
-        b.transcriptInput.setText(transcript ?: "")
-        if (tokens != null && tokens.size == 32) voice = Voice(tokens, codes?.takeIf { it.isNotEmpty() }, transcript)
-        b.playVoiceButton.isEnabled = refFile().isFile
+    /** Reloads the library list and selects [selectId] (or the newest voice). */
+    private fun refreshVoices(selectId: String?) {
+        voices = library.list()
+        b.voiceMenu.setSimpleItems(voices.map { it.name }.toTypedArray())
+        selectVoice(voices.firstOrNull { it.id == selectId } ?: voices.lastOrNull())
+    }
+
+    private fun selectVoice(v: SavedVoice?) {
+        if (v?.id != current?.id && player.playing == "voice") player.stop()
+        current = v
+        prefs.edit().putString("current_voice", v?.id).apply()
+        showingVoice = true
+        b.voiceMenu.setText(v?.name ?: "", false)
+        b.transcriptInput.setText(v?.transcript ?: "")
+        showingVoice = false
+        b.voiceLayout.visibility = if (voices.isEmpty()) View.GONE else View.VISIBLE
+        b.transcriptLayout.visibility = if (v == null) View.GONE else View.VISIBLE
+        b.accentSwitch.visibility = if (v == null) View.GONE else View.VISIBLE
+        if (v != null) SessionLog.i("voice", "selected '${v.name}' (${v.id}, %.1f s, ${v.promptCodes?.size ?: 0} prompt codes)".format(v.seconds))
         showVoiceStatus()
+        updateButtons()
     }
 
     private fun showVoiceStatus() {
-        val v = voice
+        val v = current
         if (v == null) {
             b.voiceStatus.text = getString(R.string.no_voice)
             return
         }
-        val label = prefs.getString("voice_label", "Saved voice")
         val accent = when {
             !b.accentSwitch.isChecked -> "accent matching off"
-            v.promptCodes == null -> "set this voice up again (record or pick it) to match its accent"
-            v.transcript.isNullOrBlank() -> "type what's said in the clip to match its accent"
+            v.promptCodes == null -> "add this voice again to match its accent"
+            v.transcript.isBlank() -> "type what's said in the clip to match its accent"
             else -> "accent matching on"
         }
-        b.voiceStatus.text = "$label · ready · $accent"
+        b.voiceStatus.text = "%s · %.1f s clip · %s".format(v.source.ifBlank { "voice" }, v.seconds, accent)
+    }
+
+    private fun renameVoice() {
+        val v = current ?: return
+        askName("Rename voice", v.name) { name ->
+            SessionLog.i("voice", "renamed '${v.name}' to '$name'")
+            v.name = name
+            library.save(v)
+            refreshVoices(v.id)
+        }
+    }
+
+    private fun deleteVoice() {
+        val v = current ?: return
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Delete '${v.name}'?")
+            .setMessage("Its recording is deleted too.")
+            .setPositiveButton("Delete") { _, _ ->
+                player.stop()
+                library.delete(v.id)
+                SessionLog.i("voice", "deleted '${v.name}' (${v.id})")
+                current = null
+                refreshVoices(null)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Text-entry dialog; [onOk] gets the trimmed, non-empty name. */
+    private fun askName(title: String, initial: String, onCancel: (() -> Unit)? = null, onOk: (String) -> Unit) {
+        val input = TextInputEditText(this).apply {
+            setText(initial)
+            setSelection(initial.length)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+        }
+        val box = TextInputLayout(this).apply {
+            setPadding(48, 16, 48, 0)
+            addView(input)
+        }
+        MaterialAlertDialogBuilder(this)
+            .setTitle(title)
+            .setView(box)
+            .setPositiveButton("Save") { _, _ -> onOk(input.text?.toString()?.trim()?.ifBlank { initial } ?: initial) }
+            .setNegativeButton("Cancel") { _, _ -> onCancel?.invoke() }
+            .setOnCancelListener { onCancel?.invoke() }
+            .show()
+    }
+
+    private suspend fun askNameSuspend(title: String, initial: String): String? = suspendCancellableCoroutine { c ->
+        askName(title, initial, onCancel = { if (c.isActive) c.resume(null) }) { if (c.isActive) c.resume(it) }
     }
 
     private fun startRecording() {
@@ -308,79 +402,94 @@ class MainActivity : AppCompatActivity() {
         b.recordLevel.visibility = View.VISIBLE
         b.script.visibility = View.VISIBLE
         b.script.text = getString(R.string.script_intro) + "\n\n“" + getString(R.string.script_text) + "”"
+        SessionLog.i("voice", "recording started")
         lifecycleScope.launch {
-            val wav = withContext(Dispatchers.IO) {
-                AudioIO.record(20f, { recording.get() }) { peak, secs ->
-                    runOnUiThread {
-                        b.recordLevel.progress = (peak * 100).toInt()
-                        b.voiceStatus.text = "Recording… %.1f s".format(secs)
+            val wav = try {
+                withContext(Dispatchers.IO) {
+                    AudioIO.record(20f, { recording.get() }) { peak, secs ->
+                        runOnUiThread {
+                            b.recordLevel.progress = (peak * 100).toInt()
+                            b.voiceStatus.text = "Recording… %.1f s".format(secs)
+                        }
                     }
                 }
+            } catch (e: Throwable) {
+                SessionLog.e("voice", "recording failed", e)
+                FloatArray(0)
             }
             recording.set(false)
             b.recordButton.text = getString(R.string.record)
             b.recordLevel.visibility = View.GONE
             b.script.visibility = View.GONE
-            setVoice(wav, "Recorded voice", getString(R.string.script_text))
+            SessionLog.i("voice", "recording stopped: %.1f s".format(wav.size / 16000f))
+            addVoice(wav, "Recorded", getString(R.string.script_text), library.nextName(), askName = true)
         }
     }
 
-    private fun loadVoiceFromUri(uri: Uri, label: String, transcript: String?, then: (() -> Unit)? = null) {
+    private fun loadVoiceFromUri(uri: Uri, name: String, transcript: String?, askName: Boolean, then: (() -> Unit)? = null) {
         lifecycleScope.launch {
             try {
                 b.voiceStatus.text = "Reading audio…"
+                val t0 = SystemClock.elapsedRealtime()
                 val wav = withContext(Dispatchers.IO) { AudioIO.decodeToMono(this@MainActivity, uri, 16000, 30f) }
-                if (setVoice(wav, label, transcript)) then?.invoke()
+                SessionLog.i("voice", "decoded '$name': %.1f s in %d ms".format(wav.size / 16000f, SystemClock.elapsedRealtime() - t0))
+                if (addVoice(wav, "File", transcript, name, askName)) then?.invoke()
             } catch (e: Throwable) {
-                Log.e(TAG, "decode failed", e)
+                SessionLog.e("voice", "couldn't read '$name'", e)
                 b.voiceStatus.text = "Couldn't read that file: ${e.message}"
             }
         }
     }
 
-    /** Analyses a new voice clip: voice tokens from the whole clip, speech codes from its first 12 s. */
-    private suspend fun setVoice(raw: FloatArray, label: String, transcript: String?): Boolean {
+    /** Analyses a clip (voice tokens from the whole clip, speech codes from its first 12 s) and adds it to the library. */
+    private suspend fun addVoice(raw: FloatArray, source: String, transcript: String?, defaultName: String, askName: Boolean): Boolean {
         val wav = AudioIO.trimSilence(raw)
         if (wav.size < 16000 * 1.5) {
             b.voiceStatus.text = "That clip is too short (%.1f s of sound). Aim for 6–12 seconds.".format(wav.size / 16000f)
+            SessionLog.w("voice", "clip too short: %.1f s after trimming".format(wav.size / 16000f))
             return false
         }
         val p = Engine.pipeline ?: run { b.voiceStatus.text = "Models aren't loaded yet"; return false }
         setBusy(true)
         b.voiceStatus.text = "Analysing voice…"
         val haveSemantic = File(ModelFiles.dir(this), ModelFiles.SEMANTIC).isFile
+        val t0 = SystemClock.elapsedRealtime()
         val (tokens, codes) = try {
             withContext(Engine.worker) {
-                AudioIO.writeWav(refFile(), wav, 16000)
                 val t = p.encodeVoiceTokens(wav)
                 val c = if (haveSemantic) p.encodePromptCodes(wav.copyOf(min(wav.size, MiraPipeline.PROMPT_MAX_SAMPLES))) else null
                 t to c
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "voice analysis failed", e)
+            SessionLog.e("voice", "voice analysis failed", e)
             b.voiceStatus.text = "Couldn't analyse the voice: ${e.message}"
             setBusy(false)
             return false
         }
-        val secs = wav.size / 16000f
-        val desc = "$label · %.1f s".format(secs) + if (secs > 12.5f) " (first 12 s used for accent)" else ""
-        prefs.edit().putString("voice_tokens", tokens.joinToString(","))
-            .putString("voice_codes", codes?.joinToString(","))
-            .putString("voice_label", desc).apply()
-        voice = Voice(tokens, codes, transcript)
-        b.transcriptInput.setText(transcript ?: "")  // also saves it (text watcher)
-        b.playVoiceButton.isEnabled = true
+        SessionLog.i("voice", "analysed %.1f s clip in %d ms: %d prompt codes%s · %s".format(wav.size / 16000f,
+            SystemClock.elapsedRealtime() - t0, codes?.size ?: 0, if (haveSemantic) "" else " (no semantic encoder)", SessionLog.vitals()))
         setBusy(false)
-        showVoiceStatus()
-        Log.i(TAG, "voice set: ${tokens.size} tokens, ${codes?.size ?: 0} prompt codes, transcript=${!transcript.isNullOrBlank()}")
+        val name = if (askName) askNameSuspend("Name this voice", defaultName) else defaultName
+        if (name == null) {
+            SessionLog.i("voice", "new voice discarded")
+            showVoiceStatus()
+            return false
+        }
+        val v = library.add(name, source, wav, tokens, codes, transcript ?: "")
+        SessionLog.i("voice", "added '${v.name}' (${v.id})")
+        refreshVoices(v.id)
         return true
     }
 
-    private fun refFile() = File(filesDir, "voice_ref.wav")
+    private fun displayName(uri: Uri): String = runCatching {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+            if (c.moveToFirst()) c.getString(0)?.substringBeforeLast('.') else null
+        }
+    }.getOrNull() ?: library.nextName()
 
     /** The voice used for speaking: with its clip prompt only when accent matching is on and usable. */
     private fun speakingVoice(): Voice? {
-        val v = voice ?: return null
+        val v = current?.toVoice() ?: return null
         return if (b.accentSwitch.isChecked && v.accentMode) v else Voice(v.tokens, null, null)
     }
 
@@ -388,7 +497,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun speak(text: String, hd: Boolean, play: Boolean = true, outName: String? = null, seedOverride: Int? = null) {
         val p = Engine.pipeline ?: return
-        val v = speakingVoice() ?: run { toast("Record or pick a voice first"); return }
+        val v = speakingVoice() ?: run { toast("Add a voice first"); return }
         if (text.isBlank()) return
         player.stop()
         cancel.set(false)
@@ -397,6 +506,8 @@ class MainActivity : AppCompatActivity() {
         val rate = if (hd) 48000 else 16000
         val seed = seedOverride ?: if (b.randomSeedSwitch.isChecked) (System.nanoTime() and 0x7fffffff).toInt() else 0
         val stats = mutableListOf<ChunkStats>()
+        SessionLog.i("speak", "start: ${text.length} chars, voice '${current?.name}', accent ${v.accentMode}, hd $hd, " +
+            "seed $seed, ${p.llmThreads} threads · ${SessionLog.vitals()}")
         lifecycleScope.launch {
             val t0 = SystemClock.elapsedRealtime()
             var audio: FloatArray? = null
@@ -406,13 +517,18 @@ class MainActivity : AppCompatActivity() {
                         onStatus = { s -> runOnUiThread { b.genStatus.text = s } }, stats = stats)
                 }
             } catch (e: Throwable) {
-                Log.e(TAG, "synthesis failed", e)
+                SessionLog.e("speak", "synthesis failed", e)
                 b.genStatus.text = "Failed: ${e.message}"
             }
             val totalMs = SystemClock.elapsedRealtime() - t0
+            for ((i, s) in stats.withIndex()) {
+                SessionLog.i("speak", "part ${i + 1}: ${s.text.length} chars, prompt ${s.promptTokens} tok in %.0f ms, %d speech tok in %.0f ms (%.1f tok/s), decode %.0f ms, upsample %.0f ms"
+                    .format(s.prefillMs, s.speechTokens, s.llmMs, s.speechTokens / (s.llmMs / 1000), s.decodeMs, s.upsampleMs))
+            }
             setBusy(false)
             if (cancel.get()) {
                 b.genStatus.text = "Stopped"
+                SessionLog.i("speak", "cancelled after %.1f s".format(totalMs / 1000.0))
             } else if (audio != null && audio.isNotEmpty()) {
                 lastAudio = audio
                 lastRate = rate
@@ -420,11 +536,12 @@ class MainActivity : AppCompatActivity() {
                 if (outName != null) {
                     val f = File(getExternalFilesDir("out"), outName)
                     AudioIO.writeWav(f, audio, rate)
-                    Log.i(TAG, "wrote ${f.path}")
+                    SessionLog.i("speak", "wrote ${f.path}")
                 }
                 if (play) player.play("output", audio, rate)
                 updatePlayButtons()
             }
+            SessionLog.i("speak", "end · ${SessionLog.vitals()}")
             loadPipeline()  // applies settings changed meanwhile (e.g. over adb), then runs any queued request
         }
     }
@@ -455,7 +572,7 @@ class MainActivity : AppCompatActivity() {
             put("upsampler_s", up); put("total_s", totalMs / 1000.0); put("hd", hd); put("accent", accent)
             put("seed", seed); put("threads", p?.llmThreads); put("gguf", p?.gguf)
         }
-        Log.i(TAG, "MIRA_RESULT $json")
+        SessionLog.i("speak", "MIRA_RESULT $json")
     }
 
     private fun saveOutput() {
@@ -463,8 +580,10 @@ class MainActivity : AppCompatActivity() {
         try {
             val name = "mira_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".wav"
             AudioIO.saveToMusic(this, name, a, lastRate)
+            SessionLog.i("output", "saved Music/MiraVoice/$name")
             toast("Saved Music/MiraVoice/$name")
         } catch (e: Throwable) {
+            SessionLog.e("output", "save failed", e)
             toast("Save failed: ${e.message}")
         }
     }
@@ -476,11 +595,11 @@ class MainActivity : AppCompatActivity() {
             val rel = try {
                 withContext(Dispatchers.IO) { Updater.latest() }
             } catch (e: Throwable) {
-                Log.w(TAG, "update check failed", e)
+                SessionLog.w("update", "update check failed: ${e.message}")
                 if (!silent) toast("Couldn't check for updates: ${e.message}")
                 return@launch
             }
-            Log.i(TAG, "update check: latest=${rel?.version} installed=${BuildConfig.VERSION_NAME}")
+            SessionLog.i("update", "latest release ${rel?.version ?: "none"}, installed ${BuildConfig.VERSION_NAME}")
             if (rel == null || !Updater.isNewer(rel.version, BuildConfig.VERSION_NAME)) {
                 if (!silent) toast("You have the latest version (${BuildConfig.VERSION_NAME})")
                 return@launch
@@ -489,13 +608,14 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Mira Voice ${rel.version} is available")
                 .setMessage("You have ${BuildConfig.VERSION_NAME}.\n\n" + rel.notes.take(1500))
                 .setPositiveButton("Install") { _, _ -> installUpdate(rel) }
-                .setNegativeButton("Later", null)
+                .setNegativeButton("Later") { _, _ -> SessionLog.i("update", "update ${rel.version} postponed") }
                 .show()
         }
     }
 
     private fun installUpdate(rel: Updater.Release) {
         if (!packageManager.canRequestPackageInstalls()) {
+            SessionLog.i("update", "asking for the install-apps permission")
             MaterialAlertDialogBuilder(this)
                 .setTitle("Allow updates")
                 .setMessage("To install updates, allow Mira Voice to install apps on the next screen, then come back.")
@@ -508,6 +628,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         b.modelStatus.text = "Downloading update ${rel.version}…"
+        SessionLog.i("update", "downloading ${rel.apkUrl} (${rel.apkSize} bytes)")
         lifecycleScope.launch {
             try {
                 val apk = withContext(Dispatchers.IO) {
@@ -519,25 +640,18 @@ class MainActivity : AppCompatActivity() {
                 }
                 withContext(Dispatchers.IO) { Updater.install(this@MainActivity, apk) }
                 b.modelStatus.text = "Installing update ${rel.version}…"
+                SessionLog.i("update", "handed ${apk.name} to the installer")
             } catch (e: Throwable) {
-                Log.e(TAG, "update failed", e)
+                SessionLog.e("update", "update failed", e)
                 b.modelStatus.text = "Update failed: ${e.message}"
             }
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (!Engine.updateChecked) {
-            Engine.updateChecked = true
-            checkForUpdates(silent = true)
-        }
-    }
-
     // ------------------------------------------------------------------ adb automation
     // adb shell am start -n dev.local.miravoice/.MainActivity --es text "Hi" [--es voice_path /path.wav
-    //     --es voice_transcript "words in the clip"] [--ez hd true] [--es out result.wav] [--ei seed 0]
-    //     [--ez play false]   -> logcat "MIRA_RESULT {...}"
+    //     --es voice_transcript "words in the clip" --es voice_name NAME] [--ez hd true] [--es out result.wav]
+    //     [--ei seed 0] [--ez play false]   -> session log / logcat "MIRA_RESULT {...}"
 
     private fun handleAutomation() {
         val i = pendingIntent ?: return
@@ -547,11 +661,13 @@ class MainActivity : AppCompatActivity() {
         val hd = i.getBooleanExtra("hd", true)
         val out = i.getStringExtra("out")
         val seed = if (i.hasExtra("seed")) i.getIntExtra("seed", 0) else null
-        Log.i(TAG, "automation request: hd=$hd out=$out seed=$seed config=${Engine.configKey}")
+        SessionLog.i("automation", "request: hd=$hd out=$out seed=$seed config=${Engine.configKey}")
         val go = { speak(text, hd, play = i.getBooleanExtra("play", true), outName = out, seedOverride = seed) }
         val path = i.getStringExtra("voice_path")
-        if (path != null) loadVoiceFromUri(Uri.fromFile(File(path)), "File ${File(path).name}", i.getStringExtra("voice_transcript"), go)
-        else go()
+        if (path != null) {
+            val name = i.getStringExtra("voice_name") ?: File(path).nameWithoutExtension
+            loadVoiceFromUri(Uri.fromFile(File(path)), name, i.getStringExtra("voice_transcript"), askName = false, then = go)
+        } else go()
     }
 
     // ------------------------------------------------------------------ ui helpers
@@ -565,9 +681,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButtons() {
         val ready = Engine.pipeline != null && !busy
-        b.speakButton.isEnabled = ready && voice != null
+        b.speakButton.isEnabled = ready && current != null
         b.recordButton.isEnabled = ready || recording.get()
         b.pickButton.isEnabled = ready
+        b.renameVoiceButton.isEnabled = current != null && !busy
+        b.deleteVoiceButton.isEnabled = current != null && !busy
+        b.voiceLayout.isEnabled = !busy
         b.threadsSlider.isEnabled = !busy
         b.ggufLayout.isEnabled = !busy
         b.downloadButton.isEnabled = !busy
@@ -575,6 +694,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updatePlayButtons() {
+        b.playVoiceButton.isEnabled = current?.let { library.refWav(it.id).isFile } == true
         b.playVoiceButton.text = getString(if (player.playing == "voice") R.string.stop else R.string.play)
         b.replayButton.text = getString(if (player.playing == "output") R.string.stop else R.string.play)
         b.replayButton.isEnabled = lastAudio != null
@@ -596,9 +716,5 @@ class MainActivity : AppCompatActivity() {
         if (freqs.isEmpty()) return 4
         val top = freqs.max()
         return freqs.count { it >= top * 0.8 }.coerceIn(2, 4)
-    }
-
-    companion object {
-        const val TAG = "MiraVoice"
     }
 }

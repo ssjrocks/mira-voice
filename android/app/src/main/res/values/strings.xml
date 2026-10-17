@@ -3,8 +3,12 @@
     <string name="subtitle">MiraTTS voice cloning, on-device</string>
     <string name="loading">Loading models…</string>
     <string name="download_models">Download models</string>
-    <string name="voice">Voice</string>
-    <string name="no_voice">No voice yet. Record one or pick an audio file.</string>
+    <string name="voices">Voices</string>
+    <string name="voice_in_use">Voice in use</string>
+    <string name="add_voice">Add a voice</string>
+    <string name="rename">Rename</string>
+    <string name="delete">Delete</string>
+    <string name="no_voice">No voices yet. Add one below: record it or pick an audio file.</string>
     <string name="record">Record</string>
     <string name="stop_recording">Stop recording</string>
     <string name="pick_file">Pick file</string>

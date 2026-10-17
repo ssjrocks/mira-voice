@@ -5,7 +5,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
-import android.util.Log
 import android.widget.Toast
 import org.json.JSONObject
 import java.io.File
@@ -16,7 +15,6 @@ import java.net.URL
 /** Checks the GitHub releases page for a newer version and installs it (the user confirms the install). */
 object Updater {
     const val REPO = "ssjrocks/mira-voice"
-    private const val TAG = "MiraUpdater"
 
     data class Release(val version: String, val notes: String, val apkUrl: String, val apkSize: Long, val pageUrl: String)
 
@@ -91,7 +89,7 @@ object Updater {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
             s.commit(pending.intentSender)
         }
-        Log.i(TAG, "install session $id committed")
+        SessionLog.i("update", "install session $id committed")
     }
 }
 
@@ -100,14 +98,15 @@ class InstallResultReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
+                SessionLog.i("update", "asking the user to confirm the install")
                 @Suppress("DEPRECATION")
                 val confirm = intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT) ?: return
                 context.startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             }
-            PackageInstaller.STATUS_SUCCESS -> Log.i("MiraUpdater", "update installed")
+            PackageInstaller.STATUS_SUCCESS -> SessionLog.i("update", "update installed")
             else -> {
                 val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE) ?: "status $status"
-                Log.w("MiraUpdater", "install failed: $msg")
+                SessionLog.w("update", "install failed (status $status): $msg")
                 Toast.makeText(context, "Update not installed: $msg", Toast.LENGTH_LONG).show()
             }
         }

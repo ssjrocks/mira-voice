@@ -12,6 +12,9 @@ object MiraNative {
     }
 
     external fun init(nativeLibDir: String)
+
+    /** Appends llama.cpp warnings/errors to this file (the session log). */
+    external fun setLogFile(path: String)
     external fun systemInfo(): String
 
     /** Returns a handle; throws RuntimeException if the model can't be loaded. */

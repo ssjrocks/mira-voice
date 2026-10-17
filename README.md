@@ -17,12 +17,15 @@ Later versions are offered in the app: it checks this repository's releases page
 
 ## Using it
 
-1. **Voice**: tap *Record* and read the sentence shown (6–12 s), or *Pick file*. For a picked file, type
-   exactly what is said in its first 12 s into *What's said in the clip*.
+1. **Add a voice** (Voices card): tap *Record* and read the sentence shown (6–12 s), or *Pick file*, then name it.
+   Voices are kept in a library: pick the one to use from the list, play its clip, rename or delete it.
 2. With **Match accent and speaking style** on, the model continues from the clip's own speech, which keeps
-   the speaker's accent (e.g. Australian) instead of the model's default American one. Off, it only copies
-   the voice's timbre.
+   the speaker's accent (e.g. Australian) instead of the model's default American one. This needs the exact words
+   spoken in the clip (*What's said in the clip*). Off, it only copies the voice's timbre.
 3. Type text and tap **Speak**. The whole text is generated first, then played.
+
+Each app session writes a log (device, timings, memory, errors) to
+`Android/data/dev.local.miravoice/files/logs`; the last 25 sessions are kept.
 
 ## How it works
 

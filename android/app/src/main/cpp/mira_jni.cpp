@@ -2,6 +2,10 @@
 #include <android/log.h>
 #include <jni.h>
 
+#include <chrono>
+#include <cstdio>
+#include <ctime>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -14,10 +18,28 @@
 
 namespace {
 
+std::mutex g_log_mutex;
+std::string g_log_path;  // the app's session log; native warnings are appended to it
+
 void log_callback(ggml_log_level level, const char *text, void *) {
     // GGML_LOG_LEVEL_CONT continues the previous line (e.g. model-load progress dots): skip it
-    if (level == GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_ERROR)
-        __android_log_print(ANDROID_LOG_WARN, TAG, "%s", text);
+    if (level != GGML_LOG_LEVEL_WARN && level != GGML_LOG_LEVEL_ERROR) return;
+    __android_log_print(ANDROID_LOG_WARN, TAG, "%s", text);
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    if (g_log_path.empty()) return;
+    if (FILE *f = std::fopen(g_log_path.c_str(), "a")) {
+        auto now = std::chrono::system_clock::now();
+        std::time_t t = std::chrono::system_clock::to_time_t(now);
+        int ms = (int)(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+        std::tm tm{};
+        localtime_r(&t, &tm);
+        char ts[32];
+        std::strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", &tm);
+        std::string line(text);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        std::fprintf(f, "%s.%03d %c/llama.cpp: %s\n", ts, ms, level == GGML_LOG_LEVEL_ERROR ? 'E' : 'W', line.c_str());
+        std::fclose(f);
+    }
 }
 
 std::string to_string(JNIEnv *env, jstring s) {
@@ -40,6 +62,12 @@ Java_dev_local_miravoice_MiraNative_init(JNIEnv *env, jobject, jstring native_li
     std::string dir = to_string(env, native_lib_dir);
     LOGI("loading ggml backends from %s", dir.c_str());
     ggml_backend_load_all_from_path(dir.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_dev_local_miravoice_MiraNative_setLogFile(JNIEnv *env, jobject, jstring path) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_log_path = to_string(env, path);
 }
 
 extern "C" JNIEXPORT jstring JNICALL
