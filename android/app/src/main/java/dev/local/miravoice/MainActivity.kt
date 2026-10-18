@@ -156,7 +156,7 @@ class MainActivity : AppCompatActivity() {
             warmPc()
         }
         showWhere()
-        if (usePc) connectPc()
+        if (usePc) connectPc(interactive = false)
         b.threadsSlider.addOnChangeListener { _, _, _ -> updateThreadsLabel() }
         b.threadsSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {}
@@ -920,8 +920,11 @@ class MainActivity : AppCompatActivity() {
         b.hdSwitch.visibility = if (usePc) View.GONE else View.VISIBLE
     }
 
-    /** Finds the PC server (saved address, mDNS, or typed in), pairs with it if needed and starts loading its model. */
-    private fun connectPc() {
+    /**
+     * Finds the PC server (saved address, mDNS, or typed in), pairs with it if needed and starts loading its model.
+     * Not [interactive] (app start): no dialogs, so a PC that's switched off only shows a status line.
+     */
+    private fun connectPc(interactive: Boolean = true) {
         if (pcConnecting) return
         pcConnecting = true
         updateButtons()
@@ -933,6 +936,10 @@ class MainActivity : AppCompatActivity() {
                 if (info == null) {
                     addr = pc.discover()
                     SessionLog.i("pc", "mDNS: ${addr ?: "nothing found"}")
+                    if (addr == null && !interactive) {
+                        b.pcStatus.text = "Your PC isn't answering. Is it on, with the Mira Voice server running? Tap Change PC to look again."
+                        return@launch
+                    }
                     if (addr == null) {
                         addr = askText("PC address", pc.address ?: "192.168.1.", "Your PC wasn't found automatically. Is the Mira " +
                             "Voice server running on it? Type its address (port 8790 unless you changed it).")
@@ -950,7 +957,13 @@ class MainActivity : AppCompatActivity() {
                         return@launch
                     }
                 }
-                if (!pc.paired || pc.address != addr) {
+                // a paired PC found at a new address (DHCP) keeps its token; a different PC answers 401 and re-pairs
+                if (pc.paired && pc.address != addr) pc.address = addr
+                if (!pc.paired) {
+                    if (!interactive) {
+                        b.pcStatus.text = "Found ${info.host}, but this phone isn't paired with it. Tap Change PC to pair."
+                        return@launch
+                    }
                     val req = withContext(Dispatchers.IO) { pc.startPairing(addr!!) }
                     val code = askText("Pair with ${info.host}", "", "Enter the 6-digit code shown on your PC's screen.", digits = true)
                     if (code.isNullOrBlank()) {
