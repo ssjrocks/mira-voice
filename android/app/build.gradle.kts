@@ -91,4 +91,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     // npu branch: ONNX Runtime with Qualcomm's QNN execution provider (Hexagon NPU); CPU EP included
     implementation("com.microsoft.onnxruntime:onnxruntime-android-qnn:1.29.0")
+    // QNN libraries newer than the 2.42 ORT ships with: must equal the QNN that compiled the models on the PC
+    // (export/qnn_context.py, onnxruntime-qnn 2.7.0 = QNN 2.51.0)
+    implementation("com.qualcomm.qti:qnn-runtime:2.51.0")
 }

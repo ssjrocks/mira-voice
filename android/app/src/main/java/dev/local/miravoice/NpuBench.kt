@@ -16,8 +16,8 @@ import kotlin.math.max
 
 /**
  * Experimental (npu branch): times a fixed-shape audio model on the CPU or on Qualcomm's NPU (QNN HTP, fp16) and
- * checks it against the PC's output. The NPU's compiled graph is cached next to the model (<model>_ctx.onnx), so
- * only the first load pays the compile time.
+ * checks it against the PC's output. A graph compiled on the PC (export/qnn_context.py: <model>_ctx.onnx and its
+ * _qnn.bin in the models folder) is used when present; otherwise the phone compiles it once and caches it.
  * adb: --es bench_model vocoder_npu.onnx --es bench_input features --es bench_shape 1,1024,412 --es bench_accel npu|cpu
  * (test vectors <model>_in.f32 / <model>_out.f32 in the models folder)
  */
@@ -48,13 +48,14 @@ object NpuBench {
         val x = readF32(File(dir, "${stem}_in.f32"))
         val expected = readF32(File(dir, "${stem}_out.f32"))
         val res = JSONObject().put("model", model).put("accel", accel).put("threads", threads)
-        val ctx = File(context.cacheDir, "${stem}_ctx.onnx")
+        val pcCtx = File(dir, "${stem}_ctx.onnx")
+        val ctx = if (pcCtx.isFile) pcCtx else File(context.cacheDir, "${stem}_ctx.onnx")
         val t0 = SystemClock.elapsedRealtime()
         val session = try {
             when (accel) {
                 "cpu" -> env.createSession(File(dir, model).path, OrtSession.SessionOptions().apply { setIntraOpNumThreads(threads) })
                 "npu" -> if (ctx.isFile) {
-                    res.put("cached", true)
+                    res.put("cached", true).put("compiled_on", if (ctx == pcCtx) "pc" else "phone")
                     env.createSession(ctx.path, qnnOptions(ctx.path, threads, generate = false))
                 } else {
                     res.put("cached", false)
