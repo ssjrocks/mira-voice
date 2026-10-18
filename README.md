@@ -2,7 +2,8 @@
 
 Voice cloning text-to-speech that runs entirely on an Android phone, built on
 [MiraTTS](https://huggingface.co/YatharthS/MiraTTS). Record or pick a short clip of a voice, type some
-text, and the phone speaks it in that voice: no server, no internet after the one-time model download.
+text, and the phone speaks it in that voice: no server, no internet after the one-time model download. Optionally,
+a PC with an NVIDIA GPU on your Wi-Fi can do the speaking instead, with bigger models ([On my PC](#on-my-pc-optional)).
 
 Tested on a Samsung Galaxy S23 (Snapdragon 8 Gen 2): about 2.5× slower than real time with 48 kHz output,
 so a 8 s sentence takes about 20 s to make.
@@ -33,6 +34,23 @@ Later versions are offered in the app: it checks this repository's releases page
    voice or edit its transcript the app test-speaks a short sentence and warns you if they don't match; any part
    that still comes out almost silent is redone without accent matching.
 3. Type text and tap **Speak**. The whole text is generated first, then played.
+
+### On my PC (optional)
+
+With a PC with an NVIDIA GPU on the same Wi-Fi, tap **On my PC**: speech is then made on the PC with bigger
+models, much faster, and voice transcripts come from Whisper large-v3-turbo. Voices stay in the app; their clips
+and transcripts are sent to the PC the first time they're used there, and the text to speak is sent with each request.
+
+| PC voice model | speed on an RTX 5080 | VRAM | output |
+|---|---|---|---|
+| [dots.tts-soar](https://huggingface.co/dots-studio/dots.tts-soar) (2B, default) | ~4–5× faster than real time | ~7 GB | 48 kHz |
+| [Qwen3-TTS 1.7B Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | ~1.7× faster than real time | ~5 GB | 24 kHz |
+
+Set up the PC once (Linux, [uv](https://docs.astral.sh/uv/), CUDA 13 driver): `server/install.sh` installs the server
+as a systemd user service that starts at login (port 8790). The app finds it on the LAN by mDNS and pairs with a
+6-digit code shown as a notification on the PC. Models load on the first request (about a minute; the app starts
+this as soon as you switch to the PC) and are unloaded after 15 idle minutes, so the GPU is free otherwise. Traffic
+is plain HTTP on your LAN, with a pairing token on every request.
 
 Each app session writes a log (device, timings, memory, errors) to
 `Android/data/dev.local.miravoice/files/logs`; the last 25 sessions are kept.
@@ -97,6 +115,10 @@ creates the folder).
 | `fix_pow.py` | rewrites `Pow(x, 2)` as `x*x` (needed for Qualcomm's NPU) |
 | `upstream/llama.cpp/convert_hf_to_gguf.py` + `llama-quantize … Q8_0` | `mira.gguf` |
 
+**NPU graphs** (experimental, `npu` branch): `export_npu.py` makes fixed-shape vocoder/upsampler models and
+`qnn_context.py` compiles them on the PC for the Snapdragon 8 Gen 2's NPU with Qualcomm's `onnxruntime-qnn`, so the
+phone doesn't have to (that compile took minutes there and ran the phone out of memory for the upsampler).
+
 `reference.py`, `phone_sim.py`, `verify_onnx.py`, `accent_test.py` check each step against the original
 PyTorch model (Whisper word error rate, speaker similarity). `tools/` has the adb test helpers and
 `release.sh`.
@@ -109,6 +131,8 @@ PyTorch model (Whisper word error rate, speaker similarity). `tools/` has the ad
   share-alike, with attribution). Built on [Spark-TTS / BiCodec](https://github.com/SparkAudio/Spark-TTS).
 - [FlashSR](https://github.com/ysharma3501/FlashSR) upsampler, [FastBiCodec](https://github.com/ysharma3501/FastBiCodec).
 - [wav2vec2-large-xlsr-53](https://huggingface.co/facebook/wav2vec2-large-xlsr-53) (Apache 2.0).
+- PC server: [dots.tts](https://github.com/studio-dots-ai/dots.tts) (Apache 2.0), [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS)
+  (Apache 2.0), [Whisper large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) (MIT).
 - [llama.cpp](https://github.com/ggml-org/llama.cpp) and [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT), [Whisper](https://github.com/openai/whisper) weights (MIT), [ONNX Runtime](https://github.com/microsoft/onnxruntime) (MIT).
 
 Only clone voices of people who have agreed to it.

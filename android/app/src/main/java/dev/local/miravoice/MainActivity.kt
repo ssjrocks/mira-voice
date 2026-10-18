@@ -26,6 +26,8 @@ import com.ssjrocks.appreports.AppReports
 import dev.local.miravoice.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -48,6 +50,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var b: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("mira", MODE_PRIVATE) }
     private val library by lazy { VoiceLibrary(this) }
+    private val pc by lazy { PcServer(this) }
+    /** "On my PC" mode: speech is made by the PC server over the LAN (see PcServer). */
+    private var usePc = false
+    private var pcConnecting = false
     private var voices: List<SavedVoice> = emptyList()
     private var current: SavedVoice? = null
     private var lastAudio: FloatArray? = null
@@ -136,6 +142,21 @@ class MainActivity : AppCompatActivity() {
             showVoiceStatus()
         }
         b.editTranscriptButton.setOnClickListener { editTranscript() }
+        usePc = prefs.getBoolean("use_pc", false)
+        b.whereGroup.check(if (usePc) R.id.pcButton else R.id.phoneButton)
+        b.whereGroup.addOnButtonCheckedListener { _, id, checked -> if (checked) setWhere(id == R.id.pcButton) }
+        b.pcSetupButton.setOnClickListener {
+            SessionLog.i("pc", "change PC pressed")
+            pc.forget()
+            connectPc()
+        }
+        b.pcEngineMenu.setOnItemClickListener { parent, _, pos, _ ->
+            pc.engine = pcEngines.getOrNull(pos)?.first ?: return@setOnItemClickListener
+            SessionLog.i("pc", "PC voice model ${pc.engine}")
+            warmPc()
+        }
+        showWhere()
+        if (usePc) connectPc()
         b.threadsSlider.addOnChangeListener { _, _, _ -> updateThreadsLabel() }
         b.threadsSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {}
@@ -267,6 +288,18 @@ class MainActivity : AppCompatActivity() {
         i ?: return
         val e = prefs.edit()
         i.getStringExtra("gguf")?.let { e.putString("gguf", it) }
+        // PC-mode test hooks, debug builds only: the activity is exported, and other apps mustn't be able to send
+        // voices to an address of their choosing
+        if (BuildConfig.DEBUG) {
+            i.getStringExtra("pc_token")?.let { t -> i.getStringExtra("pc_address")?.let { a -> pc.setPairedForTest(a, t) } }
+            i.getStringExtra("pc_engine")?.let { pc.engine = it }
+            if (i.hasExtra("use_pc")) {
+                val on = i.getBooleanExtra("use_pc", false)
+                usePc = !on  // so setWhere sees a change and reconnects
+                b.whereGroup.check(if (on) R.id.pcButton else R.id.phoneButton)
+                setWhere(on)
+            }
+        }
         if (i.hasExtra("threads")) {
             e.putInt("threads", i.getIntExtra("threads", 4))
             b.threadsSlider.value = i.getIntExtra("threads", 4).toFloat().coerceIn(1f, 8f)
@@ -355,7 +388,7 @@ class MainActivity : AppCompatActivity() {
     /** Voices made before 0.4 (or whose transcript changed) are checked once, when selected and the models are ready. */
     private fun checkUncheckedVoice() {
         val v = current ?: return
-        if (busy || Engine.pipeline == null || v.checkRatio != null || !v.toVoice().accentMode) return
+        if (usePc || busy || Engine.pipeline == null || v.checkRatio != null || !v.toVoice().accentMode) return
         lifecycleScope.launch {
             checkVoice(v)
             handleAutomation()
@@ -373,6 +406,7 @@ class MainActivity : AppCompatActivity() {
             v.promptCodes == null -> "add this voice again to match its accent"
             v.transcript.isBlank() -> "no transcript, so no accent matching"
             v.transcriptMismatch -> "⚠ transcript doesn't match the clip (tap Edit transcript)"
+            usePc -> "accent matching on"
             // the clip's codes are re-read for every part of a text: ~0.4 s per clip second on a Snapdragon 8 Gen 2
             else -> "accent matching on (each part starts about %.0f s later)".format(v.promptCodes!!.size / 50.0 * 0.4)
         }
@@ -416,8 +450,8 @@ class MainActivity : AppCompatActivity() {
             val r = reviewDialog("What's said in the clip", null, v.transcript,
                 "Type exactly what's said in the clip, word for word (play it to check). A transcript that doesn't match " +
                     "makes outputs repeat part of the clip or come out almost silent. Clear it to turn accent matching off " +
-                    "for this voice." + if (clip != null && haveAsr()) " Transcribe again redoes it from the clip." else "",
-                clip, offerRedo = clip != null && haveAsr()) ?: return@launch
+                    "for this voice." + if (clip != null && canTranscribe()) " Transcribe again redoes it from the clip." else "",
+                clip, offerRedo = clip != null && canTranscribe()) ?: return@launch
             when (r) {
                 is Review.Redo -> redoFromClip(v, clip!!)
                 is Review.Saved -> {
@@ -440,9 +474,8 @@ class MainActivity : AppCompatActivity() {
         b.voiceStatus.text = "Working out what's said in the clip…"
         val (codes, heard) = try {
             withContext(Engine.worker) {
-                val c = if (File(ModelFiles.dir(this@MainActivity), ModelFiles.SEMANTIC).isFile) p.encodePromptCodes(wav) else null
-                c to p.transcribe(wav)
-            }
+                if (File(ModelFiles.dir(this@MainActivity), ModelFiles.SEMANTIC).isFile) p.encodePromptCodes(wav) else null
+            } to transcribeClip(p, wav)
         } catch (e: Throwable) {
             SessionLog.e("voice", "re-transcribing '${v.name}' failed", e)
             setBusy(false)
@@ -518,25 +551,27 @@ class MainActivity : AppCompatActivity() {
             c.invokeOnCancellation { dialog.dismiss() }
         }
 
-    /** A dialog with one text field; returns the trimmed text, or null if cancelled. */
-    private suspend fun askText(title: String, initial: String): String? = suspendCancellableCoroutine { c ->
-        val input = TextInputEditText(this).apply {
-            setText(initial)
-            setSelection(initial.length)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+    /** A dialog with one text field (and an optional [message] above it); returns the trimmed text, or null if cancelled. */
+    private suspend fun askText(title: String, initial: String, message: String? = null, digits: Boolean = false): String? =
+        suspendCancellableCoroutine { c ->
+            val input = TextInputEditText(this).apply {
+                setText(initial)
+                setSelection(initial.length)
+                inputType = if (digits) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+            }
+            val box = TextInputLayout(this).apply {
+                setPadding(48, 16, 48, 0)
+                addView(input)
+            }
+            MaterialAlertDialogBuilder(this)
+                .setTitle(title)
+                .apply { if (message != null) setMessage(message) }
+                .setView(box)
+                .setPositiveButton(if (digits) "Pair" else "Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
+                .setNegativeButton("Cancel") { _, _ -> if (c.isActive) c.resume(null) }
+                .setOnCancelListener { if (c.isActive) c.resume(null) }
+                .show()
         }
-        val box = TextInputLayout(this).apply {
-            setPadding(48, 16, 48, 0)
-            addView(input)
-        }
-        MaterialAlertDialogBuilder(this)
-            .setTitle(title)
-            .setView(box)
-            .setPositiveButton("Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
-            .setNegativeButton("Cancel") { _, _ -> if (c.isActive) c.resume(null) }
-            .setOnCancelListener { if (c.isActive) c.resume(null) }
-            .show()
-    }
 
     private fun startRecording(mode: AddMode) {
         player.stop()
@@ -615,10 +650,10 @@ class MainActivity : AppCompatActivity() {
             val tc = withContext(Engine.worker) {
                 p.encodeVoiceTokens(wav) to if (haveSemantic) p.encodePromptCodes(wav) else null
             }
-            if (preset == null && haveAsr()) {
+            if (preset == null && canTranscribe()) {
                 b.voiceStatus.text = "Working out what was said…"
                 val t1 = SystemClock.elapsedRealtime()
-                heard = withContext(Engine.worker) { p.transcribe(wav) }
+                heard = transcribeClip(p, wav)
                 SessionLog.i("voice", "speech recognition: %.1f s clip in %d ms, ${heard?.length ?: 0} chars"
                     .format(wav.size / 16000f, SystemClock.elapsedRealtime() - t1))
             }
@@ -763,6 +798,7 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------ speech
 
     private fun speak(text: String, hd: Boolean, play: Boolean = true, outName: String? = null, seedOverride: Int? = null) {
+        if (usePc) return speakOnPc(text, play, outName, seedOverride)
         val p = Engine.pipeline ?: return
         val v = speakingVoice() ?: run { toast("Add a voice first"); return }
         if (text.isBlank()) return
@@ -861,6 +897,176 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ------------------------------------------------------------------ on my PC
+
+    private var pcEngines: List<Pair<String, String>> = emptyList()
+
+    private fun setWhere(onPc: Boolean) {
+        if (onPc == usePc) return
+        usePc = onPc
+        prefs.edit().putBoolean("use_pc", onPc).apply()
+        SessionLog.i("pc", if (onPc) "switched to the PC" else "switched to the phone")
+        showWhere()
+        showVoiceStatus()
+        updateButtons()
+        if (onPc) connectPc() else checkUncheckedVoice()
+    }
+
+    /** Settings that only apply on the phone are hidden in PC mode. */
+    private fun showWhere() {
+        val pcViews = listOf(b.pcStatus, b.pcSetupButton)
+        for (v in pcViews) v.visibility = if (usePc) View.VISIBLE else View.GONE
+        b.pcEngineLayout.visibility = if (usePc && pcEngines.size > 1) View.VISIBLE else View.GONE
+        b.hdSwitch.visibility = if (usePc) View.GONE else View.VISIBLE
+    }
+
+    /** Finds the PC server (saved address, mDNS, or typed in), pairs with it if needed and starts loading its model. */
+    private fun connectPc() {
+        if (pcConnecting) return
+        pcConnecting = true
+        updateButtons()
+        lifecycleScope.launch {
+            try {
+                b.pcStatus.text = "Looking for your PC…"
+                var addr = pc.address
+                var info = addr?.let { a -> runCatching { withContext(Dispatchers.IO) { pc.info(a) } }.getOrNull() }
+                if (info == null) {
+                    addr = pc.discover()
+                    SessionLog.i("pc", "mDNS: ${addr ?: "nothing found"}")
+                    if (addr == null) {
+                        addr = askText("PC address", pc.address ?: "192.168.1.", "Your PC wasn't found automatically. Is the Mira " +
+                            "Voice server running on it? Type its address (port 8790 unless you changed it).")
+                            ?.takeIf { it.isNotBlank() }?.let { if (':' in it) it else "$it:8790" }
+                    }
+                    if (addr == null) {
+                        b.pcStatus.text = "No PC set. Tap Change PC to try again, or switch back to the phone."
+                        return@launch
+                    }
+                    info = try {
+                        withContext(Dispatchers.IO) { pc.info(addr) }
+                    } catch (e: Throwable) {
+                        SessionLog.w("pc", "no server at $addr: ${e.message}")
+                        b.pcStatus.text = "Couldn't reach the Mira Voice server at $addr (${e.message}). Tap Change PC to try again."
+                        return@launch
+                    }
+                }
+                if (!pc.paired || pc.address != addr) {
+                    val req = withContext(Dispatchers.IO) { pc.startPairing(addr!!) }
+                    val code = askText("Pair with ${info.host}", "", "Enter the 6-digit code shown on your PC's screen.", digits = true)
+                    if (code.isNullOrBlank()) {
+                        b.pcStatus.text = "Not paired. Tap Change PC to pair."
+                        return@launch
+                    }
+                    withContext(Dispatchers.IO) { pc.confirmPairing(addr!!, req, code) }
+                    SessionLog.i("pc", "paired with ${info.host} at $addr")
+                }
+                pcEngines = info.engines
+                if (pcEngines.none { it.first == pc.engine }) pcEngines.firstOrNull()?.let { pc.engine = it.first }
+                b.pcEngineMenu.setSimpleItems(pcEngines.map { it.second }.toTypedArray())
+                b.pcEngineMenu.setText(pcEngines.firstOrNull { it.first == pc.engine }?.second ?: "", false)
+                b.pcStatus.text = "Using ${info.host} · ${info.gpu}. Speech is made there; voices and text are sent over your Wi-Fi."
+                SessionLog.i("pc", "connected: ${info.host} · ${info.gpu} · server ${info.version} at $addr")
+                warmPc()
+            } catch (e: Throwable) {
+                SessionLog.e("pc", "connecting to the PC failed", e)
+                b.pcStatus.text = "Couldn't connect to the PC: ${e.message}. Tap Change PC to try again."
+            } finally {
+                pcConnecting = false
+                showWhere()
+                updateButtons()
+                handleAutomation()
+            }
+        }
+    }
+
+    /** The PC loads its voice model on first use (up to a minute); start that now rather than when Speak is tapped. */
+    private fun warmPc() {
+        lifecycleScope.launch {
+            runCatching { withContext(Dispatchers.IO) { pc.warmup() } }
+                .onFailure { SessionLog.w("pc", "warm-up failed: ${it.message}") }
+        }
+    }
+
+    private fun canTranscribe() = haveAsr() || (usePc && pc.paired)
+
+    /** What's said in a clip: on the PC in PC mode (Whisper large, better with accents), else on the phone. */
+    private suspend fun transcribeClip(p: MiraPipeline, wav: FloatArray): String? {
+        if (usePc && pc.paired) {
+            try {
+                return withContext(Dispatchers.IO) { pc.transcribe(wav) }.also { SessionLog.i("voice", "transcribed on the PC") }
+            } catch (e: Throwable) {
+                SessionLog.w("voice", "PC speech recognition failed (${e.message}); using the phone's")
+            }
+        }
+        return if (haveAsr()) withContext(Engine.worker) { p.transcribe(wav) } else null
+    }
+
+    private fun speakOnPc(text: String, play: Boolean, outName: String?, seedOverride: Int?) {
+        val v = current ?: run { toast("Add a voice first"); return }
+        val ref = library.refWav(v.id).takeIf { it.isFile } ?: run { toast("This voice has no clip to send to the PC"); return }
+        if (text.isBlank()) return
+        if (!pc.paired) { connectPc(); return }
+        player.stop()
+        cancel.set(false)
+        setBusy(true)
+        b.stopButton.isEnabled = true
+        val seed = seedOverride ?: if (b.randomSeedSwitch.isChecked) (System.nanoTime() and 0x7fffffff).toInt() else 0
+        // the PC clones from clip + transcript ("accent matching"), or from the clip alone when that's off
+        val transcript = if (b.accentSwitch.isChecked && !v.transcriptMismatch) v.transcript else ""
+        SessionLog.i("speak", "start on the PC (${pc.engine}): ${text.length} chars, voice '${v.name}', transcript ${transcript.isNotEmpty()}, seed $seed")
+        lifecycleScope.launch {
+            val t0 = SystemClock.elapsedRealtime()
+            val ticker = launch {
+                while (isActive) {
+                    val s = (SystemClock.elapsedRealtime() - t0) / 1000
+                    b.genStatus.text = "Speaking on your PC… $s s" + if (s >= 8) " (the first time, the PC loads its model: up to a minute)" else ""
+                    delay(1000)
+                }
+            }
+            val r = try {
+                withContext(Dispatchers.IO) { pc.speak(ref, transcript, text, seed) { cancel.get() } }
+            } catch (e: Throwable) {
+                if (!cancel.get()) {
+                    SessionLog.e("speak", "PC synthesis failed", e)
+                    b.genStatus.text = "The PC couldn't speak it: ${e.message}" +
+                        if (!pc.paired) "\nThe PC doesn't know this phone any more: tap Change PC to pair again." else ""
+                }
+                null
+            }
+            ticker.cancel()
+            setBusy(false)
+            val totalMs = SystemClock.elapsedRealtime() - t0
+            if (cancel.get()) {
+                b.genStatus.text = "Stopped"
+                SessionLog.i("speak", "PC synthesis cancelled after %.1f s".format(totalMs / 1000.0))
+            } else if (r != null && r.audio.isNotEmpty()) {
+                lastAudio = r.audio
+                lastRate = r.rate
+                val secs = r.audio.size / r.rate.toDouble()
+                b.genStatus.text = "Done on your PC: %.1f s of speech in %.1f s".format(secs, totalMs / 1000.0)
+                b.stats.text = buildString {
+                    append("PC model   %s%n".format(pcEngines.firstOrNull { it.first == pc.engine }?.second ?: pc.engine))
+                    append("Parts      %d   audio %.1f s at %d kHz%n".format(r.parts, secs, r.rate / 1000))
+                    if (r.loadSeconds >= 1) append("Loading    %.1f s (first use)%n".format(r.loadSeconds))
+                    append("Generating %.1f s  (%.2fx real time)%n".format(r.genSeconds, r.genSeconds / secs))
+                    append("Total      %.1f s incl. Wi-Fi".format(totalMs / 1000.0))
+                }
+                SessionLog.i("speak", "MIRA_RESULT " + JSONObject().apply {
+                    put("where", "pc"); put("engine", pc.engine); put("audio_s", secs); put("gen_s", r.genSeconds)
+                    put("load_s", r.loadSeconds); put("total_s", totalMs / 1000.0); put("parts", r.parts); put("rate", r.rate)
+                })
+                if (outName != null) {
+                    val f = File(getExternalFilesDir("out"), outName)
+                    AudioIO.writeWav(f, r.audio, r.rate)
+                    SessionLog.i("speak", "wrote ${f.path}")
+                }
+                if (play) player.play("output", r.audio, r.rate)
+                updatePlayButtons()
+            }
+            handleAutomation()
+        }
+    }
+
     // ------------------------------------------------------------------ updates
 
     private fun checkForUpdates(silent: Boolean) {
@@ -928,7 +1134,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleAutomation() {
         val i = pendingIntent ?: return
-        if (busy || Engine.pipeline == null) return
+        if (busy || (Engine.pipeline == null && !usePc)) return
         pendingIntent = null
         val text = i.getStringExtra("text") ?: return
         val hd = i.getBooleanExtra("hd", true)
@@ -956,7 +1162,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButtons() {
         val ready = Engine.pipeline != null && !busy
-        b.speakButton.isEnabled = ready && current != null
+        b.speakButton.isEnabled = (if (usePc) !busy && !pcConnecting else ready) && current != null
         val rec = recordingMode
         b.exampleButton.isEnabled = if (recording.get()) rec == AddMode.EXAMPLE else ready
         b.recordButton.isEnabled = if (recording.get()) rec == AddMode.SPEECH else ready
@@ -970,6 +1176,8 @@ class MainActivity : AppCompatActivity() {
         b.threadsSlider.isEnabled = !busy
         b.ggufLayout.isEnabled = !busy
         b.downloadButton.isEnabled = !busy
+        b.whereGroup.isEnabled = !busy
+        b.pcSetupButton.isEnabled = !busy && !pcConnecting
         updatePlayButtons()
     }
 

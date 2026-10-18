@@ -1,0 +1,9 @@
+# PyTorch with CUDA comes first, from its own index (install.sh); torch and torchaudio minor versions must match
+dots.tts==0.3.1
+qwen-tts==0.1.1
+transformers==4.57.3
+fastapi
+uvicorn
+zeroconf
+soundfile
+librosa
