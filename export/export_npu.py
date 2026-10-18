@@ -4,9 +4,13 @@ vocoder_npu.onnx    features [1, 1024, 412] -> [1, 1, 131840]   (one 8 s window:
 upsampler_npu.onnx  wav16 [1, 1, 128640] -> [1, 1, 385920]      (one 8 s window + 320 samples context each side)
 
 Both use x*x instead of Pow(x, 2) (the NPU computes Pow as exp(y*log x), wrong for negative x). The upsampler's
-weight-norm/Expand weights are constant-folded and its strided depthwise convolutions (rejected by the NPU) become
-stride-1 convolutions + Slice(step 2), which is the same maths.
+weight-norm/Expand weights are constant-folded and its depthwise convolutions (rejected by the NPU) become ordinary
+convolutions with block-diagonal weights, which is the same maths.
+
+usage: export_npu.py                 both models, 8 s upsampler window
+       export_npu.py --up-seconds N  only the upsampler, N s window, as upsampler_npu<N>s.onnx
 """
+import argparse
 import subprocess
 import sys
 
@@ -19,7 +23,11 @@ import common as C
 
 B = C.BUILD
 VOC_FRAMES = 412
-UP_SAMPLES = 8 * 16000 + 2 * 320
+ap = argparse.ArgumentParser()
+ap.add_argument("--up-seconds", type=int)
+args = ap.parse_args()
+UP_SAMPLES = (args.up_seconds or 8) * 16000 + 2 * 320
+UP_NAME = f"upsampler_npu{args.up_seconds}s" if args.up_seconds else "upsampler_npu"
 
 
 def fix_shape(src, dst, name, shape):
@@ -34,30 +42,27 @@ def fold(src, dst):
     ort.InferenceSession(src, so, providers=["CPUExecutionProvider"])
 
 
-def unstride_depthwise(path):
+def densify_depthwise(path):
+    """Depthwise Conv (group == channels) -> ordinary Conv with a block-diagonal weight. The NPU's validator rejects
+    these 12-tap depthwise convolutions (error 3110), strided or not; ordinary convolutions run fine there."""
     m = onnx.load(path)
     g = m.graph
     inits = {t.name: t for t in g.initializer}
-    nodes, n_fixed = [], 0
+    n_fixed = 0
     for n in g.node:
         at = {a.name: a for a in n.attribute}
         w = inits.get(n.input[1]) if n.op_type == "Conv" and len(n.input) > 1 else None
-        if (w is not None and "group" in at and at["group"].i > 1 and at["group"].i == w.dims[0]
-                and "strides" in at and list(at["strides"].ints) == [2]):
-            at["strides"].ints[:] = [1]
-            full = n.output[0] + "_s1"
-            out = n.output[0]
-            n.output[0] = full
-            nodes.append(n)
-            consts = {k: numpy_helper.from_array(np.array(v, np.int64), f"{n.name}_{k}") for k, v in
-                      [("starts", [0]), ("ends", [2 ** 31 - 1]), ("axes", [2]), ("steps", [2])]}
-            g.initializer.extend(consts.values())
-            nodes.append(helper.make_node("Slice", [full] + [c.name for c in consts.values()], [out], name=n.name + "_step2"))
-            n_fixed += 1
-        else:
-            nodes.append(n)
-    del g.node[:]
-    g.node.extend(nodes)
+        if w is None or "group" not in at or at["group"].i <= 1 or at["group"].i != w.dims[0] or w.dims[1] != 1:
+            continue
+        wd = numpy_helper.to_array(w)
+        dense = np.zeros((wd.shape[0], wd.shape[0], wd.shape[2]), wd.dtype)
+        for c in range(wd.shape[0]):
+            dense[c, c] = wd[c, 0]
+        name = f"{n.name}_dense_w"
+        g.initializer.append(numpy_helper.from_array(dense, name))
+        n.input[1] = name
+        at["group"].i = 1
+        n_fixed += 1
     onnx.checker.check_model(m)
     onnx.save(m, path)
     return n_fixed
@@ -71,10 +76,11 @@ def check(name, ref_model, new_model, inp, x):
     a.astype(np.float32).tofile(new_model.replace(".onnx", "_out.f32"))
 
 
-fix_shape(f"{B}/vocoder_m.onnx", f"{B}/vocoder_npu.onnx", "features", [1, 1024, VOC_FRAMES])
+if not args.up_seconds:
+    fix_shape(f"{B}/vocoder_m.onnx", f"{B}/vocoder_npu.onnx", "features", [1, 1024, VOC_FRAMES])
 fix_shape(f"{B}/upsampler_m.onnx", f"{B}/upsampler_npu_tmp.onnx", "wav16", [1, 1, UP_SAMPLES])
-fold(f"{B}/upsampler_npu_tmp.onnx", f"{B}/upsampler_npu.onnx")
-print("upsampler: strided depthwise convs rewritten:", unstride_depthwise(f"{B}/upsampler_npu.onnx"))
+fold(f"{B}/upsampler_npu_tmp.onnx", f"{B}/{UP_NAME}.onnx")
+print("upsampler: depthwise convs made dense:", densify_depthwise(f"{B}/{UP_NAME}.onnx"))
 
 import json
 ref = json.load(open(f"{B}/ref/ex1.json"))
@@ -83,10 +89,11 @@ proc = ort.InferenceSession(f"{B}/processer.onnx", providers=["CPUExecutionProvi
 feats = proc.run(None, {"speech_tokens": codes, "context_tokens": np.array(ref["global_tokens"], np.int32).reshape(1, 1, 32)})[0]
 f = np.zeros((1, 1024, VOC_FRAMES), np.float32)
 f[:, :, :feats.shape[2]] = feats[:, :, :VOC_FRAMES]
-check("vocoder_npu", f"{B}/vocoder.onnx", f"{B}/vocoder_npu.onnx", "features", f)
+if not args.up_seconds:
+    check("vocoder_npu", f"{B}/vocoder.onnx", f"{B}/vocoder_npu.onnx", "features", f)
 w = ort.InferenceSession(f"{B}/vocoder.onnx", providers=["CPUExecutionProvider"]).run(None, {"features": feats})[0].reshape(-1)
 u = np.zeros((1, 1, UP_SAMPLES), np.float32)
 u[0, 0, :min(len(w), UP_SAMPLES)] = w[:UP_SAMPLES]
-check("upsampler_npu", f"{B}/upsampler.onnx", f"{B}/upsampler_npu.onnx", "wav16", u)
+check(UP_NAME, f"{B}/upsampler.onnx", f"{B}/{UP_NAME}.onnx", "wav16", u)
 import os
 os.remove(f"{B}/upsampler_npu_tmp.onnx")
