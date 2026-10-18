@@ -3,13 +3,11 @@ does the speaking (dots.tts or Qwen3-TTS, both bigger than the phone's model) an
 large-v3-turbo).
 
 Models load on the first request and unload after IDLE_UNLOAD_S without requests, so the GPU is free for other
-work (Ollama, games) the rest of the time. The phone finds the server by mDNS (_miravoice._tcp) and pairs once with
-a code shown as a desktop notification; every other request needs the token it gets then.
+work (Ollama, games) the rest of the time. The phone finds the server by mDNS (_miravoice._tcp) or a typed address
+(e.g. the PC's Tailscale IP). There is no pairing: anything that can reach the port can use it.
 
-API (JSON unless noted; all but /v1/info and /v1/pair* need "Authorization: Bearer <token>"):
+API (JSON unless noted):
   GET  /v1/info                       server, GPU and engines
-  POST /v1/pair         {device}      starts pairing: shows a 6-digit code on the PC -> {request}
-  POST /v1/pair/confirm {request, code}                                             -> {token}
   GET  /v1/voices/{id}                200 if the voice is stored here, else 404
   PUT  /v1/voices/{id}  {wav_b64, transcript}   stores a voice clip (WAV) and what's said in it
   POST /v1/warmup       {engine}      starts loading an engine (returns at once)
@@ -21,13 +19,10 @@ usage: python mira_server.py [--host 0.0.0.0] [--port 8790]
 import argparse
 import asyncio
 import base64
-import hmac
 import io
-import json
 import logging
 import os
 import re
-import secrets
 import socket
 import subprocess
 import time
@@ -41,11 +36,10 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 SERVICE_TYPE = "_miravoice._tcp.local."
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "mira-voice-server"
 VOICES = DATA / "voices"
-TOKENS = DATA / "tokens.json"
 IDLE_UNLOAD_S = int(os.environ.get("MIRA_IDLE_UNLOAD_S", "900"))
 MAX_TEXT = 5000
 CHUNK_CHARS = 300  # longer texts are spoken in parts of up to this many characters, split between sentences
@@ -189,6 +183,26 @@ def ensure_loaded(engine: Engine):
     log.info("loaded %s in %.1f s", engine.id, time.time() - t)
 
 
+def with_room(engine: Engine, fn, *a):
+    """Runs fn(*a) for [engine]; if the GPU runs out of memory (a long clip's cache on top of Whisper, say), unloads the
+    other models and tries once more. Runs on the GPU thread."""
+    import gc
+    import torch
+    try:
+        return fn(*a)
+    except torch.OutOfMemoryError:
+        others = [e for e in ENGINES.values() if e is not engine and e.loaded]
+        if not others:
+            raise
+    # retry outside the except block: the exception's traceback holds the failed attempt's tensors
+    log.warning("%s ran out of GPU memory; unloading %s and trying again", engine.id, ", ".join(e.id for e in others))
+    for e in others:
+        e.unload()
+    gc.collect()
+    torch.cuda.empty_cache()
+    return fn(*a)
+
+
 async def on_gpu(fn, *a):
     global last_used
     last_used = time.time()
@@ -254,55 +268,7 @@ def read_wav16k(data: bytes) -> np.ndarray:
     return audio.astype(np.float32)
 
 
-# ------------------------------------------------------------------------------------------------ pairing
-
-class Pairing:
-    def __init__(self):
-        self.tokens = json.loads(TOKENS.read_text()) if TOKENS.exists() else {}
-        self.pending = {}  # request id -> (code, device, expires, attempts)
-
-    def start(self, device: str) -> str:
-        now = time.time()
-        self.pending = {k: v for k, v in self.pending.items() if v[2] > now}
-        if len(self.pending) >= 3:
-            raise HTTPException(429, "Too many pairing requests; try again in a few minutes")
-        req, code = secrets.token_hex(8), f"{secrets.randbelow(10 ** 6):06d}"
-        self.pending[req] = [code, device, now + 300, 0]
-        log.info("pairing request from %s: code %s", device, code)
-        subprocess.Popen(["notify-send", "-a", "Mira Voice", "-i", "audio-input-microphone", "-u", "critical",
-                          f"Mira Voice: pair {device}?", f"Enter this code on the phone: {code}"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return req
-
-    def confirm(self, req: str, code: str, device_ip: str) -> str:
-        p = self.pending.get(req)
-        if not p or p[2] < time.time():
-            raise HTTPException(404, "That pairing request has expired; start again")
-        p[3] += 1
-        if p[3] > 5:
-            self.pending.pop(req, None)
-            raise HTTPException(403, "Too many wrong codes; start again")
-        if not hmac.compare_digest(p[0], code.strip()):
-            raise HTTPException(403, "Wrong code")
-        self.pending.pop(req, None)
-        token = secrets.token_urlsafe(32)
-        self.tokens[token] = {"device": p[1], "ip": device_ip, "paired": time.strftime("%Y-%m-%d %H:%M")}
-        TOKENS.write_text(json.dumps(self.tokens, indent=1))
-        TOKENS.chmod(0o600)
-        log.info("paired %s (%s)", p[1], device_ip)
-        return token
-
-    def check(self, request: Request):
-        auth = request.headers.get("authorization", "")
-        token = auth[7:] if auth.lower().startswith("bearer ") else ""
-        if not any(hmac.compare_digest(token, t) for t in self.tokens):
-            raise HTTPException(401, "Not paired with this PC")
-
-
 # ------------------------------------------------------------------------------------------------ HTTP
-
-pairing: Pairing
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -324,21 +290,8 @@ async def info():
             "asr": ENGINES["whisper"].name, "free_vram_gb": round(free_vram_gb(), 1)}
 
 
-@app.post("/v1/pair")
-async def pair(request: Request):
-    body = await request.json()
-    return {"request": pairing.start(str(body.get("device", "a phone"))[:60])}
-
-
-@app.post("/v1/pair/confirm")
-async def pair_confirm(request: Request):
-    body = await request.json()
-    return {"token": pairing.confirm(str(body.get("request", "")), str(body.get("code", "")), request.client.host)}
-
-
 @app.get("/v1/voices/{vid}")
-async def voice_get(vid: str, request: Request):
-    pairing.check(request)
+async def voice_get(vid: str):
     if not VOICE_ID.match(vid) or not (VOICES / vid / "ref.wav").is_file():
         raise HTTPException(404, "Unknown voice")
     return {"id": vid}
@@ -346,7 +299,6 @@ async def voice_get(vid: str, request: Request):
 
 @app.put("/v1/voices/{vid}")
 async def voice_put(vid: str, request: Request):
-    pairing.check(request)
     if not VOICE_ID.match(vid):
         raise HTTPException(400, "Bad voice id")
     body = await request.json()
@@ -365,7 +317,6 @@ async def voice_put(vid: str, request: Request):
 @app.post("/v1/warmup")
 async def warmup(request: Request):
     """Starts loading an engine without waiting, so it's ready by the time the phone sends text."""
-    pairing.check(request)
     body = await request.json()
     engine = ENGINES.get(body.get("engine", "dots"))
     if engine is None or engine.id not in TTS:
@@ -378,7 +329,6 @@ async def warmup(request: Request):
 
 @app.post("/v1/speak")
 async def speak(request: Request):
-    pairing.check(request)
     body = await request.json()
     text = str(body.get("text", "")).strip()[:MAX_TEXT]
     engine = ENGINES.get(body.get("engine", "dots"))
@@ -399,7 +349,7 @@ async def speak(request: Request):
         if await request.is_disconnected():
             log.info("speak cancelled by the phone after %d of %d parts", i, len(parts))
             return Response(status_code=499)
-        a, sr = await on_gpu(engine.speak, part, voice, seed + i)
+        a, sr = await on_gpu(with_room, engine, engine.speak, part, voice, seed + i)
         out.append(trim_silence(a, sr))
         out.append(np.zeros(int(sr * 0.2), np.float32))
     audio = np.concatenate(out[:-1])
@@ -413,13 +363,12 @@ async def speak(request: Request):
 
 @app.post("/v1/transcribe")
 async def transcribe(request: Request):
-    pairing.check(request)
     body = await request.json()
     audio = read_wav16k(base64.b64decode(body["wav_b64"]))
     w = ENGINES["whisper"]
     t0 = time.time()
     await on_gpu(ensure_loaded, w)
-    text = await on_gpu(w.transcribe, audio)
+    text = await on_gpu(with_room, w, w.transcribe, audio)
     log.info("transcribed %.1f s in %.1f s", len(audio) / 16000, time.time() - t0)
     return {"text": text}
 
@@ -463,14 +412,12 @@ async def start_mdns(port: int):
 
 
 def main():
-    global pairing
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8790)
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     VOICES.mkdir(parents=True, exist_ok=True)
-    pairing = Pairing()
     app.state.port = args.port
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

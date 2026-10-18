@@ -291,7 +291,7 @@ class MainActivity : AppCompatActivity() {
         // PC-mode test hooks, debug builds only: the activity is exported, and other apps mustn't be able to send
         // voices to an address of their choosing
         if (BuildConfig.DEBUG) {
-            i.getStringExtra("pc_token")?.let { t -> i.getStringExtra("pc_address")?.let { a -> pc.setPairedForTest(a, t) } }
+            i.getStringExtra("pc_address")?.let { pc.address = it }
             i.getStringExtra("pc_engine")?.let { pc.engine = it }
             if (i.hasExtra("use_pc")) {
                 val on = i.getBooleanExtra("use_pc", false)
@@ -552,12 +552,12 @@ class MainActivity : AppCompatActivity() {
         }
 
     /** A dialog with one text field (and an optional [message] above it); returns the trimmed text, or null if cancelled. */
-    private suspend fun askText(title: String, initial: String, message: String? = null, digits: Boolean = false): String? =
+    private suspend fun askText(title: String, initial: String, message: String? = null): String? =
         suspendCancellableCoroutine { c ->
             val input = TextInputEditText(this).apply {
                 setText(initial)
                 setSelection(initial.length)
-                inputType = if (digits) InputType.TYPE_CLASS_NUMBER else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_WORDS
             }
             val box = TextInputLayout(this).apply {
                 setPadding(48, 16, 48, 0)
@@ -567,7 +567,7 @@ class MainActivity : AppCompatActivity() {
                 .setTitle(title)
                 .apply { if (message != null) setMessage(message) }
                 .setView(box)
-                .setPositiveButton(if (digits) "Pair" else "Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
+                .setPositiveButton("Save") { _, _ -> if (c.isActive) c.resume(input.text?.toString()?.trim().orEmpty()) }
                 .setNegativeButton("Cancel") { _, _ -> if (c.isActive) c.resume(null) }
                 .setOnCancelListener { if (c.isActive) c.resume(null) }
                 .show()
@@ -921,7 +921,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Finds the PC server (saved address, mDNS, or typed in), pairs with it if needed and starts loading its model.
+     * Finds the PC server (saved address, mDNS, or typed in) and starts loading its model.
      * Not [interactive] (app start): no dialogs, so a PC that's switched off only shows a status line.
      */
     private fun connectPc(interactive: Boolean = true) {
@@ -942,7 +942,8 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (addr == null) {
                         addr = askText("PC address", pc.address ?: "192.168.1.", "Your PC wasn't found automatically. Is the Mira " +
-                            "Voice server running on it? Type its address (port 8790 unless you changed it).")
+                            "Voice server running on it? Type its address, or its Tailscale IP when you're away from home " +
+                            "(port 8790 unless you changed it).")
                             ?.takeIf { it.isNotBlank() }?.let { if (':' in it) it else "$it:8790" }
                     }
                     if (addr == null) {
@@ -957,22 +958,7 @@ class MainActivity : AppCompatActivity() {
                         return@launch
                     }
                 }
-                // a paired PC found at a new address (DHCP) keeps its token; a different PC answers 401 and re-pairs
-                if (pc.paired && pc.address != addr) pc.address = addr
-                if (!pc.paired) {
-                    if (!interactive) {
-                        b.pcStatus.text = "Found ${info.host}, but this phone isn't paired with it. Tap Change PC to pair."
-                        return@launch
-                    }
-                    val req = withContext(Dispatchers.IO) { pc.startPairing(addr!!) }
-                    val code = askText("Pair with ${info.host}", "", "Enter the 6-digit code shown on your PC's screen.", digits = true)
-                    if (code.isNullOrBlank()) {
-                        b.pcStatus.text = "Not paired. Tap Change PC to pair."
-                        return@launch
-                    }
-                    withContext(Dispatchers.IO) { pc.confirmPairing(addr!!, req, code) }
-                    SessionLog.i("pc", "paired with ${info.host} at $addr")
-                }
+                pc.address = addr
                 pcEngines = info.engines
                 if (pcEngines.none { it.first == pc.engine }) pcEngines.firstOrNull()?.let { pc.engine = it.first }
                 b.pcEngineMenu.setSimpleItems(pcEngines.map { it.second }.toTypedArray())
@@ -1000,11 +986,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun canTranscribe() = haveAsr() || (usePc && pc.paired)
+    private fun canTranscribe() = haveAsr() || (usePc && pc.connected)
 
     /** What's said in a clip: on the PC in PC mode (Whisper large, better with accents), else on the phone. */
     private suspend fun transcribeClip(p: MiraPipeline, wav: FloatArray): String? {
-        if (usePc && pc.paired) {
+        if (usePc && pc.connected) {
             try {
                 return withContext(Dispatchers.IO) { pc.transcribe(wav) }.also { SessionLog.i("voice", "transcribed on the PC") }
             } catch (e: Throwable) {
@@ -1018,7 +1004,7 @@ class MainActivity : AppCompatActivity() {
         val v = current ?: run { toast("Add a voice first"); return }
         val ref = library.refWav(v.id).takeIf { it.isFile } ?: run { toast("This voice has no clip to send to the PC"); return }
         if (text.isBlank()) return
-        if (!pc.paired) { connectPc(); return }
+        if (!pc.connected) { connectPc(); return }
         player.stop()
         cancel.set(false)
         setBusy(true)
@@ -1041,8 +1027,7 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Throwable) {
                 if (!cancel.get()) {
                     SessionLog.e("speak", "PC synthesis failed", e)
-                    b.genStatus.text = "The PC couldn't speak it: ${e.message}" +
-                        if (!pc.paired) "\nThe PC doesn't know this phone any more: tap Change PC to pair again." else ""
+                    b.genStatus.text = "The PC couldn't speak it: ${e.message}"
                 }
                 null
             }

@@ -3,7 +3,6 @@ package dev.local.miravoice
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import android.os.Build
 import android.util.Base64
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -20,8 +19,8 @@ import kotlin.coroutines.resume
 
 /**
  * "On my PC" mode: the Mira Voice server on the user's PC (server/mira_server.py) speaks and transcribes with bigger
- * models on its GPU, over the LAN. The server is found by mDNS (_miravoice._tcp) or a typed address, and pairs once
- * with a code it shows on the PC; the token is kept here. Network calls block: use them off the main thread.
+ * models on its GPU, over the LAN or Tailscale. The server is found by mDNS (_miravoice._tcp) or a typed address; there
+ * is no pairing, the address is all it needs. Network calls block: use them off the main thread.
  */
 class PcServer(context: Context) {
     private val prefs = context.getSharedPreferences("pc", Context.MODE_PRIVATE)
@@ -34,38 +33,17 @@ class PcServer(context: Context) {
     var address: String?
         get() = prefs.getString("address", null)
         set(v) = prefs.edit().putString("address", v).apply()
-    private var token: String?
-        get() = prefs.getString("token", null)
-        set(v) = prefs.edit().putString("token", v).apply()
-    val paired get() = token != null && address != null
+    val connected get() = address != null
     var engine: String
         get() = prefs.getString("engine", "dots") ?: "dots"
         set(v) = prefs.edit().putString("engine", v).apply()
 
     fun forget() = prefs.edit().remove("token").remove("address").apply()
 
-    /** Test hook (debug builds only, see MainActivity.applyIntentSettings): pair with a token obtained elsewhere. */
-    fun setPairedForTest(addr: String, t: String) {
-        address = addr
-        token = t
-    }
-
     fun info(addr: String = address ?: throw IOException("No PC set")): Info {
         val j = JSONObject(String(request("GET", "/v1/info", null, addr = addr, timeoutMs = 4000)))
         val engines = j.getJSONArray("engines").let { a -> (0 until a.length()).map { a.getJSONObject(it).let { e -> e.getString("id") to e.getString("name") } } }
         return Info(j.getString("host"), j.getString("gpu"), j.getString("version"), engines)
-    }
-
-    /** Asks the PC for a pairing code (it shows it as a desktop notification); returns the request id. */
-    fun startPairing(addr: String): String =
-        JSONObject(String(request("POST", "/v1/pair", JSONObject().put("device", Build.MODEL), addr = addr, auth = false)))
-            .getString("request")
-
-    fun confirmPairing(addr: String, requestId: String, code: String) {
-        val j = JSONObject(String(request("POST", "/v1/pair/confirm", JSONObject().put("request", requestId).put("code", code),
-            addr = addr, auth = false)))
-        token = j.getString("token")
-        address = addr
     }
 
     /** Starts loading the voice model on the PC (it takes up to a minute), so it's ready when text arrives. */
@@ -117,12 +95,11 @@ class PcServer(context: Context) {
     // ---------------------------------------------------------------------------------------- HTTP
 
     private fun open(method: String, path: String, body: JSONObject?, addr: String = address ?: throw IOException("No PC set"),
-                     auth: Boolean = true, timeoutMs: Int = 15_000): HttpURLConnection {
+                     timeoutMs: Int = 15_000): HttpURLConnection {
         val c = URL("http://$addr$path").openConnection() as HttpURLConnection
         c.requestMethod = method
         c.connectTimeout = 4000
         c.readTimeout = timeoutMs
-        if (auth) token?.let { c.setRequestProperty("Authorization", "Bearer $it") }
         if (body != null) {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
@@ -136,7 +113,6 @@ class PcServer(context: Context) {
             val code = c.responseCode
             if (code in 200..299) return c.inputStream.use { it.readBytes() }
             val msg = runCatching { JSONObject(String(c.errorStream.use { it.readBytes() })).getString("error") }.getOrNull()
-            if (code == 401) token = null  // the PC forgot this phone: pair again
             throw IOException(msg ?: "The PC answered HTTP $code")
         } finally {
             c.disconnect()
@@ -144,7 +120,7 @@ class PcServer(context: Context) {
     }
 
     private fun request(method: String, path: String, body: JSONObject?, addr: String = address ?: throw IOException("No PC set"),
-                        auth: Boolean = true, timeoutMs: Int = 15_000) = read(open(method, path, body, addr, auth, timeoutMs))
+                        timeoutMs: Int = 15_000) = read(open(method, path, body, addr, timeoutMs))
 
     /** 16-bit PCM WAV (what the server sends) -> samples and sample rate. */
     private fun parseWav(b: ByteArray): Pair<FloatArray, Int> {

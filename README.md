@@ -47,10 +47,11 @@ and transcripts are sent to the PC the first time they're used there, and the te
 | [Qwen3-TTS 1.7B Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | ~1.7× faster than real time | ~5 GB | 24 kHz |
 
 Set up the PC once (Linux, [uv](https://docs.astral.sh/uv/), CUDA 13 driver): `server/install.sh` installs the server
-as a systemd user service that starts at login (port 8790). The app finds it on the LAN by mDNS and pairs with a
-6-digit code shown as a notification on the PC. Models load on the first request (about a minute; the app starts
-this as soon as you switch to the PC) and are unloaded after 15 idle minutes, so the GPU is free otherwise. Traffic
-is plain HTTP on your LAN, with a pairing token on every request.
+as a systemd user service that starts at login (port 8790). The app finds it on the LAN by mDNS, or you type its
+address (for example its Tailscale IP when you're away from home). Models load on the first request (about a minute;
+the app starts this as soon as you switch to the PC) and are unloaded after 15 idle minutes, so the GPU is free
+otherwise. There is no pairing or login: traffic is plain HTTP, and anything that can reach port 8790 can use the
+server, so keep that port off the internet (LAN and tailnet only).
 
 Each app session writes a log (device, timings, memory, errors) to
 `Android/data/dev.local.miravoice/files/logs`; the last 25 sessions are kept.
