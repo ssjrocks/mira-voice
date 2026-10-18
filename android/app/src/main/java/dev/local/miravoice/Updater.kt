@@ -72,6 +72,11 @@ object Updater {
         return f
     }
 
+    /** Deletes downloaded update APKs: [install] copies them into the installer session, so none is needed after a restart. */
+    fun deleteDownloads(context: Context) {
+        context.cacheDir.listFiles { f -> f.name.startsWith("update-") && f.name.endsWith(".apk") }?.forEach { it.delete() }
+    }
+
     /** Hands the APK to the system installer; Android then asks the user to confirm. */
     fun install(context: Context, apk: File) {
         val pi = context.packageManager.packageInstaller

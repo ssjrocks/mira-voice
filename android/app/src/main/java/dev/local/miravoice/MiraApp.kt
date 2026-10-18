@@ -12,6 +12,7 @@ class MiraApp : Application() {
         MiraNative.init(applicationInfo.nativeLibraryDir)
         SessionLog.path?.let { MiraNative.setLogFile(it) }
         SessionLog.i("session", "native: ${MiraNative.systemInfo().trim()}")
+        Updater.deleteDownloads(this)
         // Crash/problem reports (shared AppReports) carry this session's log, and the previous one:
         // a native crash or ANR is only reported on the next launch, after the session that died.
         AppReports.attach("session log") { SessionLog.path?.let { File(it) }?.takeIf { it.exists() }?.readText() }
