@@ -36,4 +36,5 @@
     <string name="on_pc">On my PC</string>
     <string name="pc_engine">PC voice model</string>
     <string name="pc_change">Change PC</string>
+    <string name="pc_retry">Try again</string>
 </resources>

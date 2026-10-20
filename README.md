@@ -47,8 +47,10 @@ and transcripts are sent to the PC the first time they're used there, and the te
 | [Qwen3-TTS 1.7B Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base) | ~1.7× faster than real time | ~5 GB | 24 kHz |
 
 Set up the PC once (Linux, [uv](https://docs.astral.sh/uv/), CUDA 13 driver): `server/install.sh` installs the server
-as a systemd user service that starts at login (port 8790). The app finds it on the LAN by mDNS, or you type its
-address (for example its Tailscale IP when you're away from home). Models load on the first request (about a minute;
+as a systemd user service that starts at login, or at boot with `loginctl enable-linger` (port 8790). The app finds it
+on the LAN by mDNS, or you type its address. The PC tells the app all its addresses (home network and Tailscale), and
+the app keeps them and uses whichever answers, so the same setup works at home and, with Tailscale on the phone, away
+from home. Models load on the first request (about a minute;
 the app starts this as soon as you switch to the PC) and are unloaded after 15 idle minutes, so the GPU is free
 otherwise. There is no pairing or login: traffic is plain HTTP, and anything that can reach port 8790 can use the
 server, so keep that port off the internet (LAN and tailnet only).

@@ -54,6 +54,8 @@ class MainActivity : AppCompatActivity() {
     /** "On my PC" mode: speech is made by the PC server over the LAN (see PcServer). */
     private var usePc = false
     private var pcConnecting = false
+    /** The last connection attempt found the PC (the setup button then reads Change PC, else Try again). */
+    private var pcOk = false
     private var voices: List<SavedVoice> = emptyList()
     private var current: SavedVoice? = null
     private var lastAudio: FloatArray? = null
@@ -146,8 +148,9 @@ class MainActivity : AppCompatActivity() {
         b.whereGroup.check(if (usePc) R.id.pcButton else R.id.phoneButton)
         b.whereGroup.addOnButtonCheckedListener { _, id, checked -> if (checked) setWhere(id == R.id.pcButton) }
         b.pcSetupButton.setOnClickListener {
-            SessionLog.i("pc", "change PC pressed")
-            pc.forget()
+            // connected: forget this PC and find another; not connected: look again, keeping the known addresses
+            SessionLog.i("pc", if (pcOk) "change PC pressed" else "try again pressed")
+            if (pcOk) pc.forget()
             connectPc()
         }
         b.pcEngineMenu.setOnItemClickListener { parent, _, pos, _ ->
@@ -292,6 +295,7 @@ class MainActivity : AppCompatActivity() {
         // voices to an address of their choosing
         if (BuildConfig.DEBUG) {
             i.getStringExtra("pc_address")?.let { pc.address = it }
+            i.getStringExtra("pc_addresses")?.let { pc.setAddressesForTest(it.split(",")) }
             i.getStringExtra("pc_engine")?.let { pc.engine = it }
             if (i.hasExtra("use_pc")) {
                 val on = i.getBooleanExtra("use_pc", false)
@@ -921,54 +925,66 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Finds the PC server (saved address, mDNS, or typed in) and starts loading its model.
+     * Finds the PC server (its known addresses, mDNS, or typed in) and starts loading its model.
      * Not [interactive] (app start): no dialogs, so a PC that's switched off only shows a status line.
      */
     private fun connectPc(interactive: Boolean = true) {
         if (pcConnecting) return
         pcConnecting = true
+        pcOk = false
         updateButtons()
         lifecycleScope.launch {
             try {
                 b.pcStatus.text = "Looking for your PC…"
-                var addr = pc.address
-                var info = addr?.let { a -> runCatching { withContext(Dispatchers.IO) { pc.info(a) } }.getOrNull() }
-                if (info == null) {
-                    addr = pc.discover()
+                // known addresses first (home network and Tailscale), then mDNS (home network only)
+                var found = withContext(Dispatchers.IO) { pc.findReachable() }
+                if (found == null) {
+                    val addr = pc.discover()
                     SessionLog.i("pc", "mDNS: ${addr ?: "nothing found"}")
-                    if (addr == null && !interactive) {
-                        b.pcStatus.text = "Your PC isn't answering. Is it on, with the Mira Voice server running? Tap Change PC to look again."
-                        return@launch
-                    }
-                    if (addr == null) {
-                        addr = askText("PC address", pc.address ?: "192.168.1.", "Your PC wasn't found automatically. Is the Mira " +
-                            "Voice server running on it? Type its address, or its Tailscale IP when you're away from home " +
-                            "(port 8790 unless you changed it).")
-                            ?.takeIf { it.isNotBlank() }?.let { if (':' in it) it else "$it:8790" }
-                    }
-                    if (addr == null) {
-                        b.pcStatus.text = "No PC set. Tap Change PC to try again, or switch back to the phone."
-                        return@launch
-                    }
-                    info = try {
-                        withContext(Dispatchers.IO) { pc.info(addr) }
+                    if (addr != null) found = try {
+                        addr to withContext(Dispatchers.IO) { pc.info(addr) }
                     } catch (e: Throwable) {
                         SessionLog.w("pc", "no server at $addr: ${e.message}")
-                        b.pcStatus.text = "Couldn't reach the Mira Voice server at $addr (${e.message}). Tap Change PC to try again."
+                        null
+                    }
+                }
+                val tried = pc.addresses
+                if (found == null && !interactive) {
+                    b.pcStatus.text = notFoundText(tried)
+                    return@launch
+                }
+                if (found == null) {
+                    val typed = askText("PC address", tried.firstOrNull { isTailnet(it) } ?: tried.firstOrNull() ?: "192.168.1.",
+                        (if (tried.isNotEmpty()) "No answer at ${tried.joinToString()}. " else "Your PC wasn't found automatically. ") +
+                            "Is it on, with the Mira Voice server running? Away from home, Tailscale must be on on this phone. " +
+                            "Type the PC's address: its home-network IP, or its Tailscale IP (port 8790 unless you changed it).")
+                        ?.takeIf { it.isNotBlank() }?.let { if (':' in it) it else "$it:8790" }
+                    if (typed == null) {
+                        b.pcStatus.text = notFoundText(tried)
+                        return@launch
+                    }
+                    found = try {
+                        typed to withContext(Dispatchers.IO) { pc.info(typed) }
+                    } catch (e: Throwable) {
+                        SessionLog.w("pc", "no server at $typed: ${e.message}")
+                        b.pcStatus.text = "Couldn't reach the Mira Voice server at $typed (${e.message}). Tap Try again."
                         return@launch
                     }
                 }
-                pc.address = addr
+                val (addr, info) = found!!
+                pc.remember(addr, info)
+                pcOk = true
                 pcEngines = info.engines
                 if (pcEngines.none { it.first == pc.engine }) pcEngines.firstOrNull()?.let { pc.engine = it.first }
                 b.pcEngineMenu.setSimpleItems(pcEngines.map { it.second }.toTypedArray())
                 b.pcEngineMenu.setText(pcEngines.firstOrNull { it.first == pc.engine }?.second ?: "", false)
-                b.pcStatus.text = "Using ${info.host} · ${info.gpu}. Speech is made there; voices and text are sent over your Wi-Fi."
-                SessionLog.i("pc", "connected: ${info.host} · ${info.gpu} · server ${info.version} at $addr")
+                b.pcStatus.text = "Using ${info.host} · ${info.gpu}, over " + (if (isTailnet(addr)) "Tailscale" else "your home network") +
+                    " ($addr). Speech is made there; voices and text are sent to it."
+                SessionLog.i("pc", "connected: ${info.host} · ${info.gpu} · server ${info.version} at $addr; known: ${pc.addresses.joinToString()}")
                 warmPc()
             } catch (e: Throwable) {
                 SessionLog.e("pc", "connecting to the PC failed", e)
-                b.pcStatus.text = "Couldn't connect to the PC: ${e.message}. Tap Change PC to try again."
+                b.pcStatus.text = "Couldn't connect to the PC: ${e.message}. Tap Try again."
             } finally {
                 pcConnecting = false
                 showWhere()
@@ -977,6 +993,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    /** Tailscale gives devices 100.64.0.0/10 addresses. */
+    private fun isTailnet(addr: String): Boolean {
+        val p = addr.substringBefore(':').split('.').mapNotNull { it.toIntOrNull() }
+        return p.size == 4 && p[0] == 100 && p[1] in 64..127
+    }
+
+    private fun notFoundText(tried: List<String>) =
+        "Your PC isn't answering" + (if (tried.isNotEmpty()) " (tried ${tried.joinToString()})" else "") +
+            ". Is it on, with the Mira Voice server running? Away from home, Tailscale must be on on this phone. Tap Try again."
 
     /** The PC loads its voice model on first use (up to a minute); start that now rather than when Speak is tapped. */
     private fun warmPc() {
@@ -1027,7 +1053,9 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Throwable) {
                 if (!cancel.get()) {
                     SessionLog.e("speak", "PC synthesis failed", e)
-                    b.genStatus.text = "The PC couldn't speak it: ${e.message}"
+                    b.genStatus.text = if (e is PcServer.Unreachable)
+                        "Your PC isn't answering (tried ${pc.addresses.joinToString()}). Is it on? Away from home, Tailscale must be on on this phone."
+                    else "The PC couldn't speak it: ${e.message}"
                 }
                 null
             }
@@ -1176,6 +1204,7 @@ class MainActivity : AppCompatActivity() {
         b.downloadButton.isEnabled = !busy
         b.whereGroup.isEnabled = !busy
         b.pcSetupButton.isEnabled = !busy && !pcConnecting
+        b.pcSetupButton.text = getString(if (pcOk) R.string.pc_change else R.string.pc_retry)
         updatePlayButtons()
     }
 

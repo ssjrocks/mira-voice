@@ -7,7 +7,7 @@ work (Ollama, games) the rest of the time. The phone finds the server by mDNS (_
 (e.g. the PC's Tailscale IP). There is no pairing: anything that can reach the port can use it.
 
 API (JSON unless noted):
-  GET  /v1/info                       server, GPU and engines
+  GET  /v1/info                       server, GPU, engines, and the addresses it can be reached at
   GET  /v1/voices/{id}                200 if the voice is stored here, else 404
   PUT  /v1/voices/{id}  {wav_b64, transcript}   stores a voice clip (WAV) and what's said in it
   POST /v1/warmup       {engine}      starts loading an engine (returns at once)
@@ -36,7 +36,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 SERVICE_TYPE = "_miravoice._tcp.local."
 DATA = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "mira-voice-server"
 VOICES = DATA / "voices"
@@ -280,14 +280,38 @@ async def lifespan(app: FastAPI):
         await mdns[0].async_close()
 
 
+class AccessLog:
+    """Logs every request with the device's address, so a phone that can't connect shows up (or doesn't) here."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        t, status = time.time(), [0]
+
+        async def send_status(msg):
+            if msg["type"] == "http.response.start":
+                status[0] = msg["status"]
+            await send(msg)
+        try:
+            await self.app(scope, receive, send_status)
+        finally:
+            log.info("%s %s from %s -> %s (%.1f s)", scope["method"], scope["path"],
+                     (scope.get("client") or ["?"])[0], status[0] or "no answer", time.time() - t)
+
+
 app = FastAPI(title="Mira Voice server", version=VERSION, lifespan=lifespan)
+app.add_middleware(AccessLog)
 
 
 @app.get("/v1/info")
 async def info():
     return {"name": "Mira Voice server", "version": VERSION, "host": socket.gethostname(), "gpu": gpu_name(),
             "engines": [{"id": i, "name": ENGINES[i].name, "loaded": ENGINES[i].loaded} for i in TTS],
-            "asr": ENGINES["whisper"].name, "free_vram_gb": round(free_vram_gb(), 1)}
+            "asr": ENGINES["whisper"].name, "free_vram_gb": round(free_vram_gb(), 1),
+            "addresses": addresses(app.state.port)}
 
 
 @app.get("/v1/voices/{vid}")
@@ -390,6 +414,17 @@ def lan_ip() -> str:
         return "127.0.0.1"
     finally:
         s.close()
+
+
+def addresses(port: int) -> list[str]:
+    """Where the phone can reach this server: the home network address, then Tailscale's (for when it's away)."""
+    ips = [lan_ip()]
+    try:
+        out = subprocess.run(["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True, timeout=5).stdout
+        ips += [f[3].split("/")[0] for f in (line.split() for line in out.splitlines()) if f[1].startswith("tailscale")]
+    except Exception:  # noqa: BLE001
+        pass
+    return [f"{ip}:{port}" for ip in dict.fromkeys(ips) if not ip.startswith("127.")]
 
 
 async def start_mdns(port: int):

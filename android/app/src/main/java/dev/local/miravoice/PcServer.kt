@@ -20,30 +20,61 @@ import kotlin.coroutines.resume
 /**
  * "On my PC" mode: the Mira Voice server on the user's PC (server/mira_server.py) speaks and transcribes with bigger
  * models on its GPU, over the LAN or Tailscale. The server is found by mDNS (_miravoice._tcp) or a typed address; there
- * is no pairing, the address is all it needs. Network calls block: use them off the main thread.
+ * is no pairing, the address is all it needs. It reports all its addresses (home network and Tailscale); the app keeps
+ * them and tries each, so it works at home and away without being told which. Network calls block: use them off the
+ * main thread.
  */
 class PcServer(context: Context) {
     private val prefs = context.getSharedPreferences("pc", Context.MODE_PRIVATE)
     private val nsd = context.getSystemService(NsdManager::class.java)
 
-    data class Info(val host: String, val gpu: String, val version: String, val engines: List<Pair<String, String>>)
+    data class Info(val host: String, val gpu: String, val version: String, val engines: List<Pair<String, String>>,
+                    val addresses: List<String>)
     class Spoken(val audio: FloatArray, val rate: Int, val genSeconds: Double, val loadSeconds: Double, val parts: Int)
 
-    /** "host:port" of the PC server, or null before one is found. */
+    /** "host:port" that answered last, or null before the PC is found. */
     var address: String?
         get() = prefs.getString("address", null)
         set(v) = prefs.edit().putString("address", v).apply()
     val connected get() = address != null
+
+    /** Every address the PC has answered at or reported (home network, Tailscale), the one that answered last first. */
+    val addresses: List<String>
+        get() = (listOfNotNull(address) + (prefs.getString("addresses", null)?.split(",") ?: emptyList()))
+            .filter { it.isNotBlank() }.distinct()
+
+    /** Keeps [addr] as the working address, then every address the PC says it has, then older ones (up to 6 in all). */
+    fun remember(addr: String, info: Info) {
+        prefs.edit().putString("address", addr).putString("addresses", (listOf(addr) + info.addresses + addresses).distinct()
+            .take(6).joinToString(",")).apply()
+    }
+
+    /** Tries the known addresses, the last working one first, and returns the first that answers (or null). */
+    fun findReachable(except: String? = null): Pair<String, Info>? {
+        for (a in addresses.filter { it != except }) {
+            try {
+                return (a to info(a)).also { remember(a, it.second) }
+            } catch (e: IOException) {
+                SessionLog.w("pc", "no answer at $a: ${e.message}")
+            }
+        }
+        return null
+    }
+
+    /** Test hook (debug builds only, see MainActivity.applyIntentSettings): replace the known addresses. */
+    fun setAddressesForTest(list: List<String>) =
+        prefs.edit().putString("address", list.firstOrNull()).putString("addresses", list.joinToString(",")).apply()
     var engine: String
         get() = prefs.getString("engine", "dots") ?: "dots"
         set(v) = prefs.edit().putString("engine", v).apply()
 
-    fun forget() = prefs.edit().remove("token").remove("address").apply()
+    fun forget() = prefs.edit().remove("token").remove("address").remove("addresses").apply()
 
-    fun info(addr: String = address ?: throw IOException("No PC set")): Info {
+    fun info(addr: String): Info {
         val j = JSONObject(String(request("GET", "/v1/info", null, addr = addr, timeoutMs = 4000)))
         val engines = j.getJSONArray("engines").let { a -> (0 until a.length()).map { a.getJSONObject(it).let { e -> e.getString("id") to e.getString("name") } } }
-        return Info(j.getString("host"), j.getString("gpu"), j.getString("version"), engines)
+        val addrs = j.optJSONArray("addresses")?.let { a -> (0 until a.length()).map { a.getString(it) } } ?: emptyList()  // server 1.2+
+        return Info(j.getString("host"), j.getString("gpu"), j.getString("version"), engines, addrs)
     }
 
     /** Starts loading the voice model on the PC (it takes up to a minute), so it's ready when text arrives. */
@@ -94,8 +125,27 @@ class PcServer(context: Context) {
 
     // ---------------------------------------------------------------------------------------- HTTP
 
-    private fun open(method: String, path: String, body: JSONObject?, addr: String = address ?: throw IOException("No PC set"),
-                     timeoutMs: Int = 15_000): HttpURLConnection {
+    /** The PC didn't answer at [addr] at all (as opposed to answering with an error). */
+    class Unreachable(addr: String, cause: IOException) : IOException("no answer at $addr (${cause.message})", cause)
+
+    /**
+     * Opens a request to [addr], or to the working address; if that one doesn't answer (e.g. the home address when the
+     * phone is away), switches to another known address that does and sends it there.
+     */
+    private fun open(method: String, path: String, body: JSONObject?, addr: String? = null, timeoutMs: Int = 15_000): HttpURLConnection {
+        val first = addr ?: address ?: throw IOException("No PC set")
+        try {
+            return connect(method, path, body, first, timeoutMs)
+        } catch (e: Unreachable) {
+            if (addr != null) throw e
+            SessionLog.w("pc", "${e.message}; trying the PC's other addresses")
+            val (other, _) = findReachable(except = first) ?: throw e
+            SessionLog.i("pc", "switched to $other")
+            return connect(method, path, body, other, timeoutMs)
+        }
+    }
+
+    private fun connect(method: String, path: String, body: JSONObject?, addr: String, timeoutMs: Int): HttpURLConnection {
         val c = URL("http://$addr$path").openConnection() as HttpURLConnection
         c.requestMethod = method
         c.connectTimeout = 4000
@@ -103,8 +153,13 @@ class PcServer(context: Context) {
         if (body != null) {
             c.doOutput = true
             c.setRequestProperty("Content-Type", "application/json")
-            c.outputStream.use { it.write(body.toString().toByteArray()) }
         }
+        try {
+            c.connect()  // separately, so "no answer" can be told apart from errors after connecting
+        } catch (e: IOException) {
+            throw Unreachable(addr, e)
+        }
+        if (body != null) c.outputStream.use { it.write(body.toString().toByteArray()) }
         return c
     }
 
@@ -119,8 +174,8 @@ class PcServer(context: Context) {
         }
     }
 
-    private fun request(method: String, path: String, body: JSONObject?, addr: String = address ?: throw IOException("No PC set"),
-                        timeoutMs: Int = 15_000) = read(open(method, path, body, addr, timeoutMs))
+    private fun request(method: String, path: String, body: JSONObject?, addr: String? = null, timeoutMs: Int = 15_000) =
+        read(open(method, path, body, addr, timeoutMs))
 
     /** 16-bit PCM WAV (what the server sends) -> samples and sample rate. */
     private fun parseWav(b: ByteArray): Pair<FloatArray, Int> {
