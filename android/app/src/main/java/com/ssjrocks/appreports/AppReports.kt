@@ -1,4 +1,4 @@
-// Shared crash and problem reporter for the ssjrocks Android apps.
+// Shared crash and problem reporter for my Android apps.
 //
 // Source of truth: ~/dev/app-reports/android/AppReports.kt (github.com/ssjrocks/app-reports).
 // Copy it into an app with tools/add-to-app.sh; don't edit the per-app copies.
@@ -13,8 +13,10 @@
 //  - AppReports.sendReport(note): the "Report a problem" button; sends the recent log now.
 //    AppReports.showReportDialog(activity) is the ready-made dialog for that button.
 //
-// Reports go to https://ssjrocks.com/api/reports/v1/report (write-only; read them with the
-// `app-reports` command on the desktop). No dependencies beyond the Android SDK.
+// Reports go to the URL in the manifest's com.ssjrocks.appreports.URL <meta-data>, which the build
+// fills in from the appReportsUrl Gradle property (in ~/.gradle/gradle.properties, so it isn't in
+// the app's source). Without it the app works but reports stay on the device. They're write-only;
+// read them with the `app-reports` command on the desktop. No dependencies beyond the Android SDK.
 package com.ssjrocks.appreports
 
 import android.app.Activity
@@ -28,6 +30,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
@@ -63,7 +66,7 @@ import kotlin.system.exitProcess
 
 object AppReports {
     const val LIB_VERSION = 1
-    private const val ENDPOINT = "https://ssjrocks.com/api/reports/v1/report"
+    private const val META_URL = "com.ssjrocks.appreports.URL"
     private const val TAG = "AppReports"
     private const val LOG_MAX_BYTES = 256 * 1024
     private const val LOGCAT_LINES = 1500
@@ -74,6 +77,8 @@ object AppReports {
 
     @Volatile
     private var app: Context? = null
+    @Volatile
+    private var endpoint = ""
     private val logLock = Any()
     private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "app-reports").apply { isDaemon = true } }
     private val stamp = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
@@ -88,6 +93,8 @@ object AppReports {
             if (app != null) return
             app = c
         }
+        endpoint = readEndpoint(c)
+        if (endpoint.isEmpty()) Log.w(TAG, "no report URL in this build (appReportsUrl); reports stay on the device")
         installCrashHandler()
         io.execute {
             runCatching { checkExitReasons(c) }.onFailure { Log.w(TAG, "exit reasons", it) }
@@ -415,7 +422,8 @@ object AppReports {
 
     private fun post(json: ByteArray): Int {
         val body = ByteArrayOutputStream().also { b -> GZIPOutputStream(b).use { it.write(json) } }.toByteArray()
-        val conn = URL(ENDPOINT).openConnection() as HttpURLConnection
+        val url = endpoint.ifEmpty { throw IllegalStateException("no report URL in this build") }
+        val conn = URL(url).openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 15_000
@@ -433,6 +441,16 @@ object AppReports {
     }
 
     // --- misc ------------------------------------------------------------------------------------
+
+    private fun readEndpoint(c: Context): String = runCatching {
+        val info = if (Build.VERSION.SDK_INT >= 33) {
+            c.packageManager.getApplicationInfo(c.packageName, PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            c.packageManager.getApplicationInfo(c.packageName, PackageManager.GET_META_DATA)
+        }
+        info.metaData?.getString(META_URL)
+    }.getOrNull()?.trim().orEmpty()
 
     private fun prefs(c: Context): SharedPreferences = c.getSharedPreferences("app_reports", Context.MODE_PRIVATE)
 

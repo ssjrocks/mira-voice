@@ -15,6 +15,9 @@ android {
     ndkVersion = "29.0.14206865"
 
     defaultConfig {
+        // Crash-report URL, kept out of the repo: appReportsUrl in ~/.gradle/gradle.properties.
+        // Without it the app builds and runs but sends no reports.
+        manifestPlaceholders["appReportsUrl"] = (findProperty("appReportsUrl") as String?) ?: ""
         applicationId = "dev.local.miravoice"
         minSdk = 29
         targetSdk = 36

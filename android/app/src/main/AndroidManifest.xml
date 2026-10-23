@@ -32,7 +32,10 @@
         <receiver
             android:name=".InstallResultReceiver"
             android:exported="false" />
-        <!-- Crash and problem reports to ssjrocks.com (~/dev/app-reports) -->
+        <!-- Crash and problem reports (~/dev/app-reports). The URL comes from the build. -->
+        <meta-data
+            android:name="com.ssjrocks.appreports.URL"
+            android:value="${appReportsUrl}" />
         <provider
             android:name="com.ssjrocks.appreports.AppReportsInit"
             android:authorities="${applicationId}.appreports"

@@ -59,7 +59,7 @@ Each app session writes a log (device, timings, memory, errors) to
 `Android/data/dev.local.miravoice/files/logs`; the last 25 sessions are kept.
 
 From 0.4.1, crashes (including native crashes in llama.cpp/ONNX Runtime) and freezes are reported the next time
-the app opens, to `https://ssjrocks.com/api/reports/` ([ssjrocks/app-reports](https://github.com/ssjrocks/app-reports)),
+the app opens, to the developer's server,
 with the current and previous session logs attached. Settings → *Report a problem* sends the same with your note.
 Reports never include your recordings, voices or the text you speak. Read them with `app-reports` on the build PC.
 
